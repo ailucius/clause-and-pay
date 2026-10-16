@@ -115,3 +115,21 @@ label.f { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px;
 .answer { border-left: 3px solid var(--navy-2); padding: 4px 0 4px 12px; margin: 14px 0 6px; font-size: 14.5px; line-height: 1.55; }
 .answer p { margin: 0 0 8px; white-space: pre-wrap; }
 .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+/* .btn and .row set display, which would otherwise override the hidden attribute. */
+[hidden] { display: none !important; }
+
+/* Money at a glance */
+.ledger { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin: 14px 0 16px; }
+.ledger > div { background: var(--panel); padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+.ledger .k { font-size: 12.5px; color: var(--muted); }
+.ledger .v { font-size: 16px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.ledger .paid .v { color: var(--ok); }
+.ledger .open .v { color: var(--warn); }
+/* A settled invoice */
+.stamp { display: inline-block; margin-left: 10px; padding: 1px 8px; border: 2px solid var(--ok); color: var(--ok); border-radius: 4px;
+  font-weight: 750; font-size: 12.5px; letter-spacing: 0.08em; text-transform: uppercase; transform: rotate(-4deg); }
+@media (max-width: 560px) {
+  .ledger > div { padding: 8px 9px; }
+  .ledger .v { font-size: 14px; }
+}

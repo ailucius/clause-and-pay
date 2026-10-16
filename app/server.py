@@ -7,6 +7,7 @@ import asyncio
 import os
 import uuid
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
@@ -246,7 +247,7 @@ async def invoice(cid: str, code: str, body: InvoiceRequest, request: Request):
     due = (inv.get("detail", {}).get("payment_term", {}) or {}).get("due_date")
     w.invoices[code] = {"id": inv["id"], "number": number, "status": inv.get("status"), "due_date": due, "link": link}
     w.status[code] = "invoiced"
-    w.note(f"Invoice {number} for {code} sent through PayPal ({m.currency} {m.amount}).", "ok")
+    w.note(f"Invoice {number} for {code} sent through PayPal ({m.currency} {Decimal(m.amount):,.2f}).", "ok")
     return w.model_dump()
 
 

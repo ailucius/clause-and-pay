@@ -41,6 +41,28 @@ function cite(c) {
       el("span", { class: `ver ${ok ? "ok" : "bad"}` }, ok ? "Found on the page" : "Not found: check by hand")));
 }
 
+// The app's milestone states, as shown on the timeline.
+const STATE_WORDS = { planned: "Planned", delivered: "Delivered", held: "Held", invoiced: "Invoiced", paid: "Paid" };
+
+// PayPal's status codes, said in plain words.
+const PP_WORDS = { DRAFT: "Draft", SENT: "Sent, awaiting payment", SCHEDULED: "Scheduled", UNPAID: "Unpaid",
+  PAID: "Paid", MARKED_AS_PAID: "Paid", PARTIALLY_PAID: "Partly paid", CANCELLED: "Cancelled",
+  REFUNDED: "Refunded", PARTIALLY_REFUNDED: "Partly refunded", PAYMENT_PENDING: "Payment pending" };
+const ppWord = (s) => PP_WORDS[s] || (s || "").toLowerCase().replace(/_/g, " ");
+const longDate = (iso) => { const d = new Date(`${iso}T12:00:00`); return isNaN(d) ? iso : d.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" }); };
+const isPaid = (s) => s === "PAID" || s === "MARKED_AS_PAID";
+const localTime = (iso) => { const d = new Date(iso); return isNaN(d) ? iso.slice(11, 16) : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); };
+
+// Invoiced, paid and still to collect, across the contract's milestones.
+function ledger() {
+  let invoiced = 0, paid = 0;
+  for (const m of W.schedule.milestones) {
+    const inv = W.invoices[m.code]; const v = Number(m.amount) || 0;
+    if (inv) { invoiced += v; if (isPaid(inv.status) || W.status[m.code] === "paid") paid += v; }
+  }
+  return { invoiced, paid, open: invoiced - paid };
+}
+
 function renderStatus() {
   const s = $("#status");
   s.replaceChildren(
@@ -63,6 +85,10 @@ function renderSummary() {
       el("dt", {}, "Client"), el("dd", {}, s.client_name),
       el("dt", {}, "Contract value"), el("dd", {}, s.total_value ? money(s.currency, s.total_value) : "not stated"),
       el("dt", {}, "Quotes checked"), el("dd", {}, `${st.ok} of ${st.quotes} found on their page`)),
+    (() => { const l = ledger(); return el("div", { class: "ledger", "aria-label": "Money on this contract" },
+      el("div", {}, el("span", { class: "k" }, "Invoiced"), el("span", { class: "v" }, money(s.currency, l.invoiced))),
+      el("div", { class: l.paid > 0 ? "paid" : "" }, el("span", { class: "k" }, "Paid"), el("span", { class: "v" }, money(s.currency, l.paid))),
+      el("div", { class: l.open > 0 ? "open" : "" }, el("span", { class: "k" }, "To collect"), el("span", { class: "v" }, money(s.currency, l.open)))); })(),
     ...s.issues.map((i) => el("p", { class: "issue" }, i)),
     clause("Payment terms", s.payment_terms),
     clause("Before invoicing", s.invoice_condition),
@@ -78,13 +104,13 @@ function renderTimeline() {
       el("span", {}, el("strong", {}, m.name), el("div", { class: "when" }, `Due: ${m.due_as_written}`),
         ...m.issues.map((i) => el("div", { class: "issue" }, i))),
       el("span", { style: "text-align:right" }, el("div", { class: "amt" }, money(m.currency, m.amount)),
-        el("span", { class: `state ${state}` }, state))));
+        el("span", { class: `state ${state}` }, STATE_WORDS[state] || state))));
   }));
 }
 
 function renderLog() {
   $("#log").replaceChildren(...[...W.log].reverse().map((e) =>
-    el("li", {}, el("time", {}, e.at.slice(11, 16)), el("span", { class: e.kind }, e.text))));
+    el("li", {}, el("time", { datetime: e.at }, localTime(e.at)), el("span", { class: e.kind }, e.text))));
 }
 
 function renderPanel() {
@@ -161,17 +187,19 @@ function renderPanel() {
       catch (e) { err.textContent = e.message; busy(sendRem, false, "Approve and send reminder"); }
     } }, "Approve and send reminder");
     nodes.push(el("div", { class: "result send" },
-      el("strong", {}, `Invoice ${inv.number}: ${inv.status}`),
-      el("p", {}, inv.due_date ? `Due ${inv.due_date}` : ""),
+      el("strong", {}, isPaid(inv.status) ? `Invoice ${inv.number}` : `Invoice ${inv.number}: ${ppWord(inv.status)}`),
+      isPaid(inv.status) ? el("span", { class: "stamp", "aria-label": "Paid" }, "Paid") : null,
+      el("p", {}, inv.due_date && !isPaid(inv.status) ? `Due ${longDate(inv.due_date)}` : ""),
       inv.link && el("a", { class: "link", href: inv.link, target: "_blank", rel: "noopener" }, "Open the invoice in PayPal")),
-      el("div", { class: "row" }, refresh, OPEN_STATES.includes(inv.status) ? el("button", { class: "btn", onclick: async (ev) => {
+      isPaid(inv.status) ? null : el("div", { class: "row" }, refresh, OPEN_STATES.includes(inv.status) ? el("button", { class: "btn", onclick: async (ev) => {
         err.textContent = ""; ev.target.disabled = true; ev.target.textContent = "Recording in the PayPal sandbox...";
         try { W = await post(`/api/contracts/${W.id}/milestones/${m.code}/sandbox-payment`); render(); }
         catch (e) { err.textContent = e.message; ev.target.disabled = false; ev.target.textContent = "Sandbox: record the client's payment"; }
       } }, "Sandbox: record the client's payment") : null),
       OPEN_STATES.includes(inv.status) ? el("p", { class: "hint" }, "Demo only: logs the client's bank transfer in PayPal's sandbox, so you can watch PayPal confirm the payment here.") : null,
-      el("label", { class: "f", for: "today" }, "Overdue? Draft a reminder that quotes the contract (optional: pretend today is)"),
-      today, el("div", { class: "row" }, draft, sendRem), preview);
+      ...(isPaid(inv.status) ? [] : [
+        el("label", { class: "f", for: "today" }, "Overdue? Draft a reminder that quotes the contract (optional: pretend today is)"),
+        today, el("div", { class: "row" }, draft, sendRem), preview]));
   }
   nodes.push(err);
   p.replaceChildren(...nodes.filter(Boolean));

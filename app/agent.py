@@ -87,6 +87,9 @@ The contract says this milestone ({code}: {name}) must meet these acceptance cri
 Criteria list:
 {criteria}
 
+The contract's payment schedule, in order (use it when a criterion refers to other milestones):
+{schedule}
+
 {condition}
 
 The supplier's delivery note:
@@ -110,6 +113,9 @@ async def check_delivery(s: Schedule, m: Milestone, evidence: str) -> DeliveryCh
     prompt = CHECK_PROMPT.format(
         code=m.code, name=m.name, page=acc.page if acc else "?", quote=acc.quote if acc else "(not quoted)",
         criteria="\n".join(f"- {c}" for c in m.acceptance_criteria) or "- (none listed)",
+        schedule="\n".join(f"- {x.code}: {x.name}" + (" (this milestone)" if x.code == m.code else "")
+                            + (" (the last milestone)" if i == len(s.milestones) - 1 else "")
+                            for i, x in enumerate(s.milestones)) or "- (not listed)",
         condition=cond, evidence=(evidence or "(no delivery note given)")[:6000])
     out = await generate_json(prompt, DeliveryCheck)
     rec = out.recommendation.strip().lower()
