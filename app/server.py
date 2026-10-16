@@ -1,6 +1,8 @@
 """Clause & Pay web app: one page, a small JSON API, state kept in memory per contract."""
 from __future__ import annotations
 
+import json
+import logging
 import os
 import uuid
 from datetime import date, datetime, timezone
@@ -291,3 +293,67 @@ async def reminder(cid: str, code: str, body: ReminderRequest, request: Request)
         raise HTTPException(502, f"PayPal: {e.message}")
     w.note(f"Reminder sent for invoice {rec['number']} ({code}).", "ok")
     return {"subject": subject, "note": note, "sent": True, "workspace": w.model_dump()}
+
+
+# ---- PayPal webhook: invoices paid on PayPal mark their milestone paid ----
+log = logging.getLogger("clausepay")
+PAID_STATES = ("PAID", "MARKED_AS_PAID")
+_seen_events: deque = deque(maxlen=500)
+
+
+def _event_invoice(event: dict) -> tuple[Optional[str], Optional[str]]:
+    res = event.get("resource") or {}
+    inv = res.get("invoice") if isinstance(res.get("invoice"), dict) else res
+    return inv.get("id"), inv.get("status")
+
+
+def apply_invoice_event(event: dict) -> Optional[str]:
+    """Apply a verified invoicing event to the workspace that holds the invoice.
+    Returns the milestone code it matched, or None. Safe to apply twice."""
+    etype = event.get("event_type", "")
+    inv_id, status = _event_invoice(event)
+    if not inv_id:
+        return None
+    paid = etype == "INVOICING.INVOICE.PAID" or (etype == "INVOICING.INVOICE.UPDATED" and status in PAID_STATES)
+    for w in STORE.values():
+        for code, rec in w.invoices.items():
+            if rec.get("id") != inv_id:
+                continue
+            if paid:
+                rec["status"] = status if status in PAID_STATES else "PAID"
+                if w.status.get(code) != "paid":
+                    w.status[code] = "paid"
+                    w.note(f"{code} paid: invoice {rec['number']}. Paid through PayPal (webhook).", "ok")
+            elif etype == "INVOICING.INVOICE.CANCELLED":
+                if rec.get("status") != "CANCELLED":
+                    rec["status"] = "CANCELLED"
+                    w.note(f"Invoice {rec['number']} for {code} was cancelled in PayPal.", "warn")
+            elif status:
+                rec["status"] = status
+            return code
+    return None
+
+
+@app.post("/api/paypal/webhook")
+async def paypal_webhook(request: Request):
+    raw = await request.body()
+    try:
+        event = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "Not a JSON event.")
+    webhook_id = os.environ.get("PAYPAL_WEBHOOK_ID")
+    if not webhook_id:
+        raise HTTPException(503, "The PayPal webhook is not configured on this server.")
+    try:
+        ok = await paypal().verify_webhook(headers=dict(request.headers), raw_event=raw, webhook_id=webhook_id)
+    except PayPalError:
+        ok = False
+    if not ok:
+        log.warning("PayPal webhook rejected: event %s (%s) did not verify", event.get("id"), event.get("event_type"))
+        raise HTTPException(400, "The webhook signature did not verify.")
+    if event.get("id") in _seen_events:
+        return {"ok": True, "duplicate": True}
+    _seen_events.append(event.get("id"))
+    code = apply_invoice_event(event)
+    log.info("PayPal webhook %s (%s) matched %s", event.get("id"), event.get("event_type"), code)
+    return {"ok": True, "matched": code}

@@ -177,6 +177,27 @@ function render() {
   $("#start").hidden = true; $("#contract").hidden = false;
   if (!SEL && W.schedule.milestones.length) SEL = W.schedule.milestones[0].code;
   renderSummary(); renderTimeline(); renderPanel(); renderLog();
+  watchPayments();
+}
+
+// While an invoice is open in PayPal, ask the server every 10 s whether the
+// PayPal webhook has marked it paid, so the page updates without a click. The
+// page is redrawn only when something changed, so typing is not interrupted.
+const OPEN_STATES = ["SENT", "UNPAID", "PARTIALLY_PAID", "SCHEDULED"];
+let POLL = null;
+const fingerprint = (w) => JSON.stringify([w.status, Object.values(w.invoices).map((i) => i.status), w.log.length]);
+function watchPayments() {
+  const open = Object.values(W.invoices || {}).some((i) => OPEN_STATES.includes(i.status));
+  if (!open) { if (POLL) { clearTimeout(POLL); POLL = null; } return; }
+  if (POLL) return;
+  POLL = setTimeout(async () => {
+    POLL = null;
+    try {
+      const fresh = await api(`/api/contracts/${W.id}`);
+      if (fingerprint(fresh) !== fingerprint(W)) { W = fresh; render(); return; }
+    } catch { /* keep the last view */ }
+    watchPayments();
+  }, 10000);
 }
 
 async function start(promise) {

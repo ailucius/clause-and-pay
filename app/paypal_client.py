@@ -116,6 +116,40 @@ class PayPalClient:
         return await self._call("POST", f"/v2/invoicing/invoices/{invoice_id}/payments", json=body)
 
 
+    # ---- webhooks ----
+    async def verify_webhook(self, *, headers: dict, raw_event: bytes, webhook_id: str) -> bool:
+        """Ask PayPal whether a webhook delivery is genuine (transmission signature check).
+
+        The event goes back exactly as it arrived (its raw bytes spliced into the
+        request), since PayPal checks the signature over the original body."""
+        import json as _json
+        h = {k.lower(): v for k, v in headers.items()}
+        fields = {
+            "auth_algo": h.get("paypal-auth-algo"),
+            "cert_url": h.get("paypal-cert-url"),
+            "transmission_id": h.get("paypal-transmission-id"),
+            "transmission_sig": h.get("paypal-transmission-sig"),
+            "transmission_time": h.get("paypal-transmission-time"),
+            "webhook_id": webhook_id,
+        }
+        if not all(fields.values()):
+            return False
+        body = _json.dumps(fields)[:-1] + ', "webhook_event": ' + raw_event.decode("utf-8") + "}"
+        r = await self._http.post("/v1/notifications/verify-webhook-signature", content=body.encode("utf-8"),
+                                  headers={"Authorization": f"Bearer {await self._bearer()}",
+                                           "Content-Type": "application/json"})
+        if r.status_code >= 400:
+            return False
+        return (r.json() or {}).get("verification_status") == "SUCCESS"
+
+    async def list_webhooks(self) -> list[dict]:
+        return ((await self._call("GET", "/v1/notifications/webhooks")) or {}).get("webhooks", [])
+
+    async def create_webhook(self, url: str, event_types: list[str]) -> dict:
+        return await self._call("POST", "/v1/notifications/webhooks",
+                                json={"url": url, "event_types": [{"name": n} for n in event_types]})
+
+
 def send_payload(*, subject: str | None, note: str | None, send_to_invoicer: bool = True) -> dict:
     body: dict = {"send_to_invoicer": send_to_invoicer, "send_to_recipient": True}
     if subject:
