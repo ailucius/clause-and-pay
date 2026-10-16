@@ -1,4 +1,5 @@
-"""Gemini calls with JSON schema output. The key is read from the environment only."""
+"""Gemini calls with JSON schema output. A key from the environment (Gemini API), or
+Vertex AI under the runtime's own identity when GOOGLE_GENAI_USE_VERTEXAI is set."""
 from __future__ import annotations
 
 import os
@@ -15,7 +16,13 @@ def model_id() -> str:
     return os.environ.get("CLAUSEPAY_MODEL", DEFAULT_MODEL)
 
 
+def _use_vertex() -> bool:
+    return os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("1", "true", "yes")
+
+
 def ai_configured() -> bool:
+    if _use_vertex():
+        return bool(os.environ.get("GOOGLE_CLOUD_PROJECT"))
     return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
 
 
@@ -26,6 +33,11 @@ def _get_client():
     global _client
     if _client is None:
         from google import genai
+        if _use_vertex():
+            # On Cloud Run: Vertex AI under the service's own identity, no key.
+            _client = genai.Client(vertexai=True, project=os.environ["GOOGLE_CLOUD_PROJECT"],
+                                   location=os.environ.get("GOOGLE_CLOUD_LOCATION", "global"))
+            return _client
         key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if not key:
             raise RuntimeError("Set GEMINI_API_KEY to use the AI features.")
