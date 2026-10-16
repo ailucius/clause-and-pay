@@ -105,3 +105,13 @@ label.f { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px;
 .log .warn { color: var(--warn); } .log .error { color: var(--bad); } .log .ok { color: var(--ok); }
 .foot { text-align: center; color: var(--muted); font-size: 12.5px; padding: 8px 16px 28px; }
 @media (prefers-reduced-motion: no-preference) { .ms, .btn { transition: border-color .15s, background .15s; } }
+
+/* Ask the billing agent */
+#agent textarea { width: 100%; box-sizing: border-box; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; resize: vertical; }
+.examples { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.chip { font: inherit; font-size: 12.5px; border: 1px solid var(--line); background: var(--chip); color: var(--ink); border-radius: 6px; padding: 4px 9px; cursor: pointer; }
+.chip:hover { border-color: var(--navy-2); }
+.chip:focus-visible { outline: 2px solid var(--navy-2); outline-offset: 2px; }
+.answer { border-left: 3px solid var(--navy-2); padding: 4px 0 4px 12px; margin: 14px 0 6px; font-size: 14.5px; line-height: 1.55; }
+.answer p { margin: 0 0 8px; white-space: pre-wrap; }
+.tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }

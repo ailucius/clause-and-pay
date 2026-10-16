@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent
+from . import agent, billing_agent
 from .contract_reader import read_contract
 from .llm import ai_configured, model_id
 from .paypal_client import PayPalClient, PayPalError, paypal_configured
@@ -38,6 +38,7 @@ class Workspace(BaseModel):
     status: dict[str, str] = {}  # milestone code -> planned | delivered | held | invoiced | paid
     checks: dict[str, dict] = {}
     invoices: dict[str, dict] = {}  # milestone code -> {id, number, status, due_date, link}
+    proposals: dict[str, dict] = {}  # billing agent actions waiting for the user's approval
     log: list[dict] = []
 
     def note(self, text: str, kind: str = "info") -> None:
@@ -357,3 +358,62 @@ async def paypal_webhook(request: Request):
     code = apply_invoice_event(event)
     log.info("PayPal webhook %s (%s) matched %s", event.get("id"), event.get("event_type"), code)
     return {"ok": True, "matched": code}
+
+
+class Question(BaseModel):
+    question: str
+
+
+@app.post("/api/contracts/{cid}/ask")
+async def ask_agent(cid: str, body: Question, request: Request):
+    """Ask the billing agent (Gemini + PayPal Agent Toolkit tools)."""
+    w = ws(cid)
+    q = body.question.strip()
+    if not q:
+        raise HTTPException(400, "Ask a question.")
+    if len(q) > 600:
+        raise HTTPException(400, "Keep the question under 600 characters.")
+    paypal()  # a clear 409 when PayPal is not configured
+    spend(request, "ai")
+    ctx = billing_agent.contract_context(w.schedule, w.invoices, w.status, date.today())
+    try:
+        out = await billing_agent.ask(q, ctx, allowed={i["id"] for i in w.invoices.values()})
+    except Exception as e:
+        w.note(f"The billing agent could not answer: {str(e)[:160]}", "error")
+        raise HTTPException(502, "The billing agent could not answer just now. Try again.")
+    for prop in out["proposals"]:
+        iid = prop["args"].get("invoice_id")
+        code = next((c for c, i in w.invoices.items() if i["id"] == iid), None)
+        label = f"invoice {w.invoices[code]['number']} ({code})" if code else "the invoice"
+        prop["summary"] = f"Send a PayPal reminder for {label}"
+        w.proposals[prop["id"]] = prop
+    used = ", ".join(sorted({t["tool"] for t in out["trace"]})) or "no PayPal tools"
+    w.note(f"Billing agent answered \"{q[:80]}\" using {used}.")
+    return {"answer": out["answer"], "trace": out["trace"], "proposals": out["proposals"], "workspace": w.model_dump()}
+
+
+@app.post("/api/contracts/{cid}/proposals/{pid}/approve")
+async def approve_proposal(cid: str, pid: str, request: Request):
+    w = ws(cid)
+    prop = w.proposals.get(pid)
+    if not prop:
+        raise HTTPException(404, "That action is no longer waiting for approval.")
+    paypal()
+    spend(request, "paypal")
+    try:
+        await billing_agent.approve(prop)
+    except Exception as e:
+        w.note(f"PayPal refused the agent's {prop['method']}: {str(e)[:160]}", "error")
+        raise HTTPException(502, "PayPal refused that action.")
+    w.proposals.pop(pid, None)
+    w.note(f"Approved and sent through the PayPal Agent Toolkit: {prop['summary']}.", "ok")
+    return w.model_dump()
+
+
+@app.post("/api/contracts/{cid}/proposals/{pid}/dismiss")
+async def dismiss_proposal(cid: str, pid: str):
+    w = ws(cid)
+    if w.proposals.pop(pid, None):
+        w.note("Dismissed an action the billing agent proposed.")
+    return w.model_dump()
+

@@ -172,11 +172,68 @@ function renderPanel() {
   p.replaceChildren(...nodes.filter(Boolean));
 }
 
+// Ask the billing agent: Gemini answers from the contract and looks invoices up
+// with PayPal's Agent Toolkit. A reminder it wants to send is held as a
+// proposal until the user approves it here.
+const AGENT = { q: "", busy: false, answer: null, trace: [], err: "" };
+const EXAMPLES = [
+  "Which of my invoices are still unpaid?",
+  "What interest can I charge if M1 is paid late?",
+  "M1 is late. Draft a reminder that quotes the contract.",
+];
+function renderAgent() {
+  const box = $("#agent");
+  const q = el("textarea", { id: "ask", rows: "2", placeholder: "Ask about this contract and its PayPal invoices", "aria-label": "Your question" });
+  q.value = AGENT.q;
+  q.addEventListener("input", () => { AGENT.q = q.value; });
+  const ready = CFG.paypal && CFG.ai;
+  const go = el("button", { class: "btn primary", disabled: AGENT.busy || !ready, onclick: async () => {
+    if (!AGENT.q.trim()) return;
+    AGENT.busy = true; AGENT.err = ""; renderAgent();
+    try {
+      const r = await post(`/api/contracts/${W.id}/ask`, { question: AGENT.q });
+      AGENT.answer = r.answer; AGENT.trace = r.trace || []; W = r.workspace; AGENT.busy = false; render();
+    } catch (e) { AGENT.err = e.message; AGENT.busy = false; renderAgent(); }
+  } }, AGENT.busy ? "Checking PayPal and the contract..." : "Ask");
+  const examples = el("div", { class: "examples" }, ...EXAMPLES.map((t) =>
+    el("button", { class: "chip", type: "button", onclick: () => { AGENT.q = t; renderAgent(); $("#ask").focus(); } }, t)));
+  const nodes = [
+    el("h2", {}, "Ask the billing agent"),
+    el("p", { class: "hint" }, "Answers come from the contract, with pages, and from PayPal through its Agent Toolkit. Anything the agent wants to send waits for your approval."),
+    q, examples, el("div", { class: "row" }, go),
+    !ready && el("p", { class: "hint" }, "Needs PayPal and the AI configured on this server."),
+  ];
+  if (AGENT.err) nodes.push(el("p", { class: "err", role: "alert" }, AGENT.err));
+  if (AGENT.answer) {
+    nodes.push(el("div", { class: "answer" },
+      el("p", {}, AGENT.answer),
+      AGENT.trace.length ? el("div", { class: "tools" }, el("span", { class: "hint" }, "PayPal Agent Toolkit:"),
+        ...AGENT.trace.map((t) => el("span", { class: "badge on" }, t.tool))) : null));
+  }
+  for (const p of Object.values(W.proposals || {})) {
+    nodes.push(el("div", { class: "result hold proposal" },
+      el("strong", {}, "Waiting for your approval"),
+      el("p", {}, p.summary),
+      p.args.subject ? el("p", { class: "hint" }, `Subject: ${p.args.subject}`) : null,
+      p.args.note ? el("div", { class: "preview" }, p.args.note) : null,
+      el("div", { class: "row" },
+        el("button", { class: "btn primary", onclick: async (ev) => {
+          ev.target.disabled = true;
+          try { W = await post(`/api/contracts/${W.id}/proposals/${p.id}/approve`); render(); }
+          catch (e) { AGENT.err = e.message; renderAgent(); }
+        } }, "Approve and send"),
+        el("button", { class: "btn", onclick: async () => {
+          try { W = await post(`/api/contracts/${W.id}/proposals/${p.id}/dismiss`); render(); } catch (e) { AGENT.err = e.message; renderAgent(); }
+        } }, "Dismiss"))));
+  }
+  box.replaceChildren(...nodes.filter(Boolean));
+}
+
 function render() {
   if (!W) return;
   $("#start").hidden = true; $("#contract").hidden = false;
   if (!SEL && W.schedule.milestones.length) SEL = W.schedule.milestones[0].code;
-  renderSummary(); renderTimeline(); renderPanel(); renderLog();
+  renderSummary(); renderTimeline(); renderPanel(); renderAgent(); renderLog();
   watchPayments();
 }
 
