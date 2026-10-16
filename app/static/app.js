@@ -164,7 +164,12 @@ function renderPanel() {
       el("strong", {}, `Invoice ${inv.number}: ${inv.status}`),
       el("p", {}, inv.due_date ? `Due ${inv.due_date}` : ""),
       inv.link && el("a", { class: "link", href: inv.link, target: "_blank", rel: "noopener" }, "Open the invoice in PayPal")),
-      el("div", { class: "row" }, refresh),
+      el("div", { class: "row" }, refresh, OPEN_STATES.includes(inv.status) ? el("button", { class: "btn", onclick: async (ev) => {
+        err.textContent = ""; ev.target.disabled = true; ev.target.textContent = "Recording in the PayPal sandbox...";
+        try { W = await post(`/api/contracts/${W.id}/milestones/${m.code}/sandbox-payment`); render(); }
+        catch (e) { err.textContent = e.message; ev.target.disabled = false; ev.target.textContent = "Sandbox: record the client's payment"; }
+      } }, "Sandbox: record the client's payment") : null),
+      OPEN_STATES.includes(inv.status) ? el("p", { class: "hint" }, "Demo only: logs the client's bank transfer in PayPal's sandbox, so you can watch PayPal confirm the payment here.") : null,
       el("label", { class: "f", for: "today" }, "Overdue? Draft a reminder that quotes the contract (optional: pretend today is)"),
       today, el("div", { class: "row" }, draft, sendRem), preview);
   }

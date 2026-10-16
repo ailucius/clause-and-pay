@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
 import os
 import uuid
 from datetime import date, datetime, timezone
@@ -415,5 +416,31 @@ async def dismiss_proposal(cid: str, pid: str):
     w = ws(cid)
     if w.proposals.pop(pid, None):
         w.note("Dismissed an action the billing agent proposed.")
+    return w.model_dump()
+
+
+@app.post("/api/contracts/{cid}/milestones/{code}/sandbox-payment")
+async def sandbox_payment(cid: str, code: str, request: Request):
+    """Demo only: log the client's bank transfer against the invoice in PayPal's
+    sandbox, with the Agent Toolkit's record_payment_for_invoice tool. PayPal then
+    marks the invoice paid and its webhook updates the milestone."""
+    w = ws(cid)
+    m = milestone(w, code)
+    rec = w.invoices.get(code)
+    if not rec:
+        raise HTTPException(404, f"{code} has no invoice yet.")
+    if rec.get("status") in ("PAID", "MARKED_AS_PAID"):
+        raise HTTPException(409, f"Invoice {rec['number']} is already paid.")
+    paypal()
+    spend(request, "paypal")
+    params = {"invoice_id": rec["id"], "method": "BANK_TRANSFER", "payment_date": date.today().isoformat(),
+              "amount": {"currency_code": m.currency, "value": m.amount},
+              "note": "Sandbox demo: the client's bank transfer, recorded to show PayPal confirming payment."}
+    try:
+        await asyncio.to_thread(billing_agent.paypal_api().run, "record_payment_for_invoice", params)
+    except Exception as e:
+        w.note(f"PayPal refused the sandbox payment for {code}: {str(e)[:160]}", "error")
+        raise HTTPException(502, "PayPal refused the sandbox payment.")
+    w.note(f"Sandbox: the client's payment for invoice {rec['number']} recorded in PayPal. Waiting for PayPal to confirm it.")
     return w.model_dump()
 
