@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clause &amp; Pay</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f3a5f'/%3E%3Cpath d='M9 10h14M9 16h10M9 22h7' stroke='%23e9eef5' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <div>
+      <h1>Clause &amp; Pay</h1>
+      <p class="sub">Invoices that read the contract first</p>
+    </div>
+  </div>
+  <div class="status" id="status"></div>
+</header>
+
+<main>
+  <section id="start" class="card start">
+    <h2>Start from your contract</h2>
+    <p>Upload a contract or purchase order (PDF). The agent finds every payment milestone, its amount, its due date and what must be delivered first, and shows the contract's own sentence and page for each one.</p>
+    <div class="row">
+      <label class="btn primary" for="file">Upload a contract PDF</label>
+      <input id="file" type="file" accept="application/pdf" hidden>
+      <button class="btn" id="sample">Use the sample contract</button>
+      <a class="link" href="/api/sample.pdf" target="_blank" rel="noopener">Open the sample PDF</a>
+    </div>
+    <p class="hint" id="startmsg" role="status"></p>
+  </section>
+
+  <section id="contract" hidden>
+    <div class="grid">
+      <div class="col">
+        <div class="card" id="summary"></div>
+        <div class="card">
+          <h2>Payment schedule</h2>
+          <ol class="timeline" id="timeline"></ol>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card" id="panel"><p class="hint">Select a milestone.</p></div>
+        <div class="card">
+          <h2>Activity</h2>
+          <ul class="log" id="log"></ul>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  Sample contract and parties are fictional. Invoices go to the PayPal sandbox; no real money moves.
+</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

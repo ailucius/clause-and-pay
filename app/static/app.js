@@ -1,0 +1,198 @@
+// Clause & Pay page. Plain JS, no build step. Every value from the server is
+// inserted as text (textContent), never as HTML.
+const $ = (s) => document.querySelector(s);
+let CFG = { paypal: false, ai: false };
+let W = null; // current workspace
+let SEL = null; // selected milestone code
+
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined && v !== false) n.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) n.append(k.nodeType ? k : String(k));
+  return n;
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  let body = null;
+  try { body = await r.json(); } catch { /* empty */ }
+  if (!r.ok) throw new Error((body && body.detail) || `Request failed (${r.status})`);
+  return body;
+}
+const post = (path, data) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data || {}) });
+
+function money(cur, v) {
+  if (v === null || v === undefined) return "amount unclear";
+  const n = Number(v);
+  return `${cur} ${n.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function cite(c) {
+  if (!c) return null;
+  const ok = c.status === "verified" || c.status === "moved";
+  return el("div", {},
+    el("p", { class: "quote" }, `“${c.quote}”`),
+    el("span", { class: "cite" },
+      el("span", { class: "page" }, `page ${c.page ?? "?"}`),
+      el("span", { class: `ver ${ok ? "ok" : "bad"}` }, ok ? "Found on the page" : "Not found: check by hand")));
+}
+
+function renderStatus() {
+  const s = $("#status");
+  s.replaceChildren(
+    el("span", { class: `badge ${CFG.ai ? "on" : "off"}` }, CFG.ai ? `AI: ${CFG.model}` : "AI not configured"),
+    el("span", { class: `badge ${CFG.paypal ? "on" : "off"}` }, CFG.paypal ? `PayPal ${CFG.environment} connected` : "PayPal not configured"));
+}
+
+function renderSummary() {
+  const s = W.schedule;
+  const st = { quotes: 0, ok: 0 };
+  const all = [s.payment_terms, s.late_payment, s.invoice_condition].filter(Boolean).map((c) => c.cite)
+    .concat(s.milestones.flatMap((m) => [m.payment_cite, m.acceptance_cite].filter(Boolean)));
+  for (const c of all) { st.quotes++; if (c.status === "verified" || c.status === "moved") st.ok++; }
+  const clause = (label, c) => c && el("div", { class: "clause" }, el("div", { class: "what" }, `${label}: ${c.summary}`), cite(c.cite));
+  $("#summary").replaceChildren(
+    el("h2", {}, s.contract_title),
+    el("dl", { class: "facts" },
+      el("dt", {}, "Reference"), el("dd", {}, s.contract_reference || "none given"),
+      el("dt", {}, "You (supplier)"), el("dd", {}, s.supplier_name),
+      el("dt", {}, "Client"), el("dd", {}, s.client_name),
+      el("dt", {}, "Contract value"), el("dd", {}, s.total_value ? money(s.currency, s.total_value) : "not stated"),
+      el("dt", {}, "Quotes checked"), el("dd", {}, `${st.ok} of ${st.quotes} found on their page`)),
+    ...s.issues.map((i) => el("p", { class: "issue" }, i)),
+    clause("Payment terms", s.payment_terms),
+    clause("Before invoicing", s.invoice_condition),
+    clause("Late payment", s.late_payment));
+}
+
+function renderTimeline() {
+  const s = W.schedule;
+  $("#timeline").replaceChildren(...s.milestones.map((m) => {
+    const state = W.status[m.code] || "planned";
+    return el("li", {}, el("button", { class: `ms ${SEL === m.code ? "sel" : ""}`, onclick: () => { SEL = m.code; render(); } },
+      el("span", { class: "code" }, m.code),
+      el("span", {}, el("strong", {}, m.name), el("div", { class: "when" }, `Due: ${m.due_as_written}`),
+        ...m.issues.map((i) => el("div", { class: "issue" }, i))),
+      el("span", { style: "text-align:right" }, el("div", { class: "amt" }, money(m.currency, m.amount)),
+        el("span", { class: `state ${state}` }, state))));
+  }));
+}
+
+function renderLog() {
+  $("#log").replaceChildren(...[...W.log].reverse().map((e) =>
+    el("li", {}, el("time", {}, e.at.slice(11, 16)), el("span", { class: e.kind }, e.text))));
+}
+
+function renderPanel() {
+  const p = $("#panel");
+  const m = W.schedule.milestones.find((x) => x.code === SEL);
+  if (!m) { p.replaceChildren(el("p", { class: "hint" }, "Select a milestone to check the delivery and send its invoice.")); return; }
+  const state = W.status[m.code] || "planned";
+  const check = W.checks[m.code];
+  const inv = W.invoices[m.code];
+  const err = el("p", { class: "err", role: "alert" });
+  const busy = (b, on, label) => { b.disabled = on; if (label) b.textContent = label; };
+
+  const nodes = [
+    el("h3", {}, `${m.code}: ${m.name}`),
+    el("p", { class: "when" }, `${money(m.currency, m.amount)} · due ${m.due_as_written}`),
+    el("div", { class: "clause" }, el("div", { class: "what" }, "Payment wording"), cite(m.payment_cite)),
+    el("div", { class: "what" }, "Acceptance criteria"),
+    el("ul", { class: "criteria" }, ...m.acceptance_criteria.map((c) => el("li", {}, c))),
+    m.acceptance_cite && el("div", { class: "clause" }, cite(m.acceptance_cite)),
+  ];
+
+  if (!inv) {
+    const ev = el("textarea", { id: "evidence", placeholder: "What did you deliver, and has the client accepted it? e.g. 'Inception report sent 10 Dec. Survey method, 1,250 passenger sample, dated work plan for M2 to M4. Accepted in writing by Ada Brennan on 12 Dec.'" });
+    const checkBtn = el("button", { class: "btn primary", onclick: async () => {
+      err.textContent = ""; busy(checkBtn, true, "Checking against the contract...");
+      try { W = await post(`/api/contracts/${W.id}/milestones/${m.code}/deliver`, { evidence: ev.value }); render(); }
+      catch (e) { err.textContent = e.message; busy(checkBtn, false, "Mark delivered and check"); }
+    } }, "Mark delivered and check");
+    nodes.push(el("label", { class: "f", for: "evidence" }, "Delivery note"), ev, el("div", { class: "row" }, checkBtn));
+  }
+
+  if (check) {
+    nodes.push(el("div", { class: `result ${check.recommendation}` },
+      el("strong", {}, check.recommendation === "send" ? "Ready to invoice" : "Hold the invoice"),
+      el("p", {}, check.summary),
+      el("ul", {}, ...check.criteria.map((c) => el("li", {}, `${c.met.toUpperCase()}: ${c.criterion}. ${c.evidence}`)))));
+  }
+
+  if (!inv && (state === "delivered" || state === "held")) {
+    const email = el("input", { type: "email", id: "recipient", placeholder: "client's PayPal email (sandbox buyer)" });
+    const override = state === "held" ? el("label", { class: "hint" }, el("input", { type: "checkbox", id: "override" }), " Send anyway (I take responsibility)") : null;
+    const send = el("button", { class: "btn primary", disabled: !CFG.paypal, onclick: async () => {
+      err.textContent = "";
+      if (!email.value.includes("@")) { err.textContent = "Enter the client's email."; return; }
+      busy(send, true, "Creating the invoice in PayPal...");
+      try {
+        W = await post(`/api/contracts/${W.id}/milestones/${m.code}/invoice`,
+          { recipient_email: email.value, approve: true, override_hold: !!(override && override.querySelector("input").checked) });
+        render();
+      } catch (e) { err.textContent = e.message; busy(send, false, "Approve and send invoice"); }
+    } }, "Approve and send invoice");
+    nodes.push(el("label", { class: "f", for: "recipient" }, "Send the invoice to"), email, override,
+      el("div", { class: "row" }, send),
+      !CFG.paypal && el("p", { class: "hint" }, "PayPal is not configured on this server, so invoices cannot be sent. Add sandbox keys (see the README)."));
+  }
+
+  if (inv) {
+    const refresh = el("button", { class: "btn", onclick: async () => {
+      err.textContent = "";
+      try { W = await post(`/api/contracts/${W.id}/milestones/${m.code}/refresh`); render(); } catch (e) { err.textContent = e.message; }
+    } }, "Check payment status");
+    const today = el("input", { type: "date", id: "today", "aria-label": "Pretend today is" });
+    const preview = el("div", { class: "preview", hidden: true });
+    const draft = el("button", { class: "btn", onclick: async () => {
+      err.textContent = "";
+      try {
+        const r = await post(`/api/contracts/${W.id}/milestones/${m.code}/reminder`, { approve: false, today: today.value || null });
+        preview.hidden = false; preview.textContent = `${r.subject}\n\n${r.note}`; sendRem.hidden = false;
+      } catch (e) { err.textContent = e.message; }
+    } }, "Draft a reminder");
+    const sendRem = el("button", { class: "btn primary", hidden: true, onclick: async () => {
+      err.textContent = ""; busy(sendRem, true, "Sending...");
+      try { const r = await post(`/api/contracts/${W.id}/milestones/${m.code}/reminder`, { approve: true, today: today.value || null }); W = r.workspace; render(); }
+      catch (e) { err.textContent = e.message; busy(sendRem, false, "Approve and send reminder"); }
+    } }, "Approve and send reminder");
+    nodes.push(el("div", { class: "result send" },
+      el("strong", {}, `Invoice ${inv.number}: ${inv.status}`),
+      el("p", {}, inv.due_date ? `Due ${inv.due_date}` : ""),
+      inv.link && el("a", { class: "link", href: inv.link, target: "_blank", rel: "noopener" }, "Open the invoice in PayPal")),
+      el("div", { class: "row" }, refresh),
+      el("label", { class: "f", for: "today" }, "Overdue? Draft a reminder that quotes the contract (optional: pretend today is)"),
+      today, el("div", { class: "row" }, draft, sendRem), preview);
+  }
+  nodes.push(err);
+  p.replaceChildren(...nodes.filter(Boolean));
+}
+
+function render() {
+  if (!W) return;
+  $("#start").hidden = true; $("#contract").hidden = false;
+  if (!SEL && W.schedule.milestones.length) SEL = W.schedule.milestones[0].code;
+  renderSummary(); renderTimeline(); renderPanel(); renderLog();
+}
+
+async function start(promise) {
+  const msg = $("#startmsg");
+  msg.textContent = "Reading the contract and checking every quote against its page...";
+  $("#sample").disabled = true;
+  try { W = await promise; render(); }
+  catch (e) { msg.textContent = e.message; }
+  finally { $("#sample").disabled = false; }
+}
+
+$("#sample").addEventListener("click", () => start(post("/api/contracts/sample")));
+$("#file").addEventListener("change", (ev) => {
+  const f = ev.target.files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  start(api("/api/contracts", { method: "POST", body: fd }));
+});
+
+api("/api/config").then((c) => { CFG = c; renderStatus(); }).catch(() => renderStatus());
