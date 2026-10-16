@@ -246,8 +246,10 @@ async def invoice(cid: str, code: str, body: InvoiceRequest, request: Request):
     link = recipient_link(inv)
     due = (inv.get("detail", {}).get("payment_term", {}) or {}).get("due_date")
     w.invoices[code] = {"id": inv["id"], "number": number, "status": inv.get("status"), "due_date": due, "link": link}
+    overridden = w.status.get(code) == "held"
     w.status[code] = "invoiced"
-    w.note(f"Invoice {number} for {code} sent through PayPal ({m.currency} {Decimal(m.amount):,.2f}).", "ok")
+    w.note(f"Invoice {number} for {code} sent through PayPal ({m.currency} {Decimal(m.amount):,.2f})"
+           + (", over the agent's hold." if overridden else "."), "warn" if overridden else "ok")
     return w.model_dump()
 
 
