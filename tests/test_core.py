@@ -241,3 +241,22 @@ def test_recipient_link_comes_from_invoice_metadata():
            "links": [{"rel": "self", "href": "https://api-m.sandbox.paypal.com/v2/invoicing/invoices/INV2-X"}]}
     assert recipient_link(inv) == "https://www.sandbox.paypal.com/invoice/p/#ABC"
     assert recipient_link({"links": [{"rel": "self", "href": "x"}]}) is None
+
+
+def test_demo_limits_refuse_after_the_hourly_allowance():
+    import pytest
+    from fastapi import HTTPException
+    from app import server
+
+    class Req:
+        headers = {"x-forwarded-for": "203.0.113.9, 10.0.0.1"}
+        client = None
+
+    server._hits.clear()
+    limit, _ = server.LIMITS["paypal"]
+    for _ in range(limit):
+        server.spend(Req(), "paypal")
+    with pytest.raises(HTTPException) as e:
+        server.spend(Req(), "paypal")
+    assert e.value.status_code == 429
+    assert server.client_ip(Req()) == "203.0.113.9"

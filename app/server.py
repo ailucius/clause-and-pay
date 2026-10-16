@@ -7,7 +7,10 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+import time
+from collections import defaultdict, deque
+
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -40,6 +43,46 @@ class Workspace(BaseModel):
 
 
 STORE: dict[str, Workspace] = {}
+MAX_WORKSPACES = int(os.environ.get("MAX_WORKSPACES", "300"))
+
+# Usage limits for a public demo (per visitor IP, rolling hour; and per day for
+# the whole server). Each AI call and each PayPal send counts once.
+LIMITS = {
+    "ai": (int(os.environ.get("AI_CALLS_PER_HOUR_PER_IP", "20")), 3600),
+    "paypal": (int(os.environ.get("PAYPAL_SENDS_PER_HOUR_PER_IP", "15")), 3600),
+}
+DAILY_AI_CAP = int(os.environ.get("AI_CALLS_PER_DAY", "300"))
+_hits: dict[tuple[str, str], deque] = defaultdict(deque)
+_daily: dict[str, int] = defaultdict(int)
+
+
+def client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    return (fwd.split(",")[0].strip() if fwd else "") or (request.client.host if request.client else "unknown")
+
+
+def spend(request: Request, kind: str) -> None:
+    """Count one use of `kind` for this visitor, or refuse with 429."""
+    limit, window = LIMITS[kind]
+    now = time.time()
+    q = _hits[(client_ip(request), kind)]
+    while q and q[0] < now - window:
+        q.popleft()
+    if len(q) >= limit:
+        raise HTTPException(429, "This demo limits how often one visitor can run that step. Try again in a little while.")
+    if kind == "ai":
+        day = date.today().isoformat()
+        if _daily[day] >= DAILY_AI_CAP:
+            raise HTTPException(429, "The demo has reached today's limit for AI reads. It resets tomorrow.")
+        _daily[day] += 1
+    q.append(now)
+
+
+def keep(w: "Workspace") -> None:
+    """Store a workspace, dropping the oldest once the demo holds too many."""
+    STORE[w.id] = w
+    while len(STORE) > MAX_WORKSPACES:
+        STORE.pop(next(iter(STORE)))
 _paypal: Optional[PayPalClient] = None
 
 
@@ -99,12 +142,13 @@ async def _read(data: bytes, filename: str) -> dict:
     w.note(f"Read {filename}: {st['milestones']} milestones, {st['verified']} of {st['quotes']} quotes found on their page.")
     for issue in sched.issues:
         w.note(issue, "warn")
-    STORE[w.id] = w
+    keep(w)
     return w.model_dump()
 
 
 @app.post("/api/contracts")
-async def upload(file: UploadFile = File(...)):
+async def upload(request: Request, file: UploadFile = File(...)):
+    spend(request, "ai")
     data = await file.read()
     if len(data) > MAX_UPLOAD:
         raise HTTPException(413, "The file is larger than 15 MB.")
@@ -113,9 +157,28 @@ async def upload(file: UploadFile = File(...)):
     return await _read(data, file.filename or "contract.pdf")
 
 
+_sample_sched: Optional[Schedule] = None
+
+
 @app.post("/api/contracts/sample")
-async def sample():
-    return await _read(SAMPLE.read_bytes(), SAMPLE.name)
+async def sample(request: Request):
+    """The sample is read by the model once per server start; every visitor
+    then gets their own workspace from that reading (no AI call each time)."""
+    global _sample_sched
+    if _sample_sched is None:
+        spend(request, "ai")
+        out = await _read(SAMPLE.read_bytes(), SAMPLE.name)
+        _sample_sched = Schedule.model_validate(out["schedule"])
+        return out
+    sched = _sample_sched.model_copy(deep=True)
+    w = Workspace(id=uuid.uuid4().hex[:12], filename=SAMPLE.name, schedule=sched,
+                  status={m.code: "planned" for m in sched.milestones})
+    st = sched.stats()
+    w.note(f"Read {SAMPLE.name}: {st['milestones']} milestones, {st['verified']} of {st['quotes']} quotes found on their page.")
+    for issue in sched.issues:
+        w.note(issue, "warn")
+    keep(w)
+    return w.model_dump()
 
 
 @app.get("/api/contracts/{cid}")
@@ -133,9 +196,10 @@ class Delivery(BaseModel):
 
 
 @app.post("/api/contracts/{cid}/milestones/{code}/deliver")
-async def deliver(cid: str, code: str, body: Delivery):
+async def deliver(cid: str, code: str, body: Delivery, request: Request):
     w = ws(cid)
     m = milestone(w, code)
+    spend(request, "ai")
     check = await agent.check_delivery(w.schedule, m, body.evidence)
     w.checks[code] = check.model_dump()
     w.status[code] = "delivered" if check.recommendation == "send" else "held"
@@ -151,7 +215,7 @@ class InvoiceRequest(BaseModel):
 
 
 @app.post("/api/contracts/{cid}/milestones/{code}/invoice")
-async def invoice(cid: str, code: str, body: InvoiceRequest):
+async def invoice(cid: str, code: str, body: InvoiceRequest, request: Request):
     w = ws(cid)
     m = milestone(w, code)
     if not body.approve:
@@ -161,6 +225,7 @@ async def invoice(cid: str, code: str, body: InvoiceRequest):
     if w.status.get(code) == "held" and not body.override_hold:
         raise HTTPException(409, "The agent recommended holding this invoice. Confirm the override to send it anyway.")
     pp = paypal()
+    spend(request, "paypal")
     try:
         number = await pp.next_invoice_number()
         payload = agent.invoice_payload(w.schedule, m, invoice_number=number,
@@ -207,7 +272,7 @@ class ReminderRequest(BaseModel):
 
 
 @app.post("/api/contracts/{cid}/milestones/{code}/reminder")
-async def reminder(cid: str, code: str, body: ReminderRequest):
+async def reminder(cid: str, code: str, body: ReminderRequest, request: Request):
     w = ws(cid)
     m = milestone(w, code)
     rec = w.invoices.get(code)
@@ -219,6 +284,7 @@ async def reminder(cid: str, code: str, body: ReminderRequest):
                                         monthly_rate_pct=agent.monthly_rate_from(w.schedule))
     if not body.approve:
         return {"subject": subject, "note": note, "days_overdue": agent.days_overdue(due, today)}
+    spend(request, "paypal")
     try:
         await paypal().remind(rec["id"], subject=subject, note=note)
     except PayPalError as e:
