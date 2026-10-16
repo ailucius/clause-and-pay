@@ -212,7 +212,7 @@ const AGENT = { q: "", busy: false, answer: null, trace: [], err: "" };
 const EXAMPLES = [
   "Which of my invoices are still unpaid?",
   "What interest can I charge if M1 is paid late?",
-  "M1 is late. Draft a reminder that quotes the contract.",
+  "Draft a payment reminder for M1 that quotes the contract.",
 ];
 function renderAgent() {
   const box = $("#agent");
