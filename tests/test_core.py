@@ -233,3 +233,11 @@ def test_delivery_check_forces_hold_unless_every_criterion_is_yes(pages, monkeyp
     monkeypatch.setattr(agent, "generate_json", fake)
     out = asyncio.run(agent.check_delivery(s, s.milestones[0], "Report sent."))
     assert out.recommendation == "hold"
+
+
+def test_recipient_link_comes_from_invoice_metadata():
+    from app.server import recipient_link
+    inv = {"detail": {"metadata": {"recipient_view_url": "https://www.sandbox.paypal.com/invoice/p/#ABC"}},
+           "links": [{"rel": "self", "href": "https://api-m.sandbox.paypal.com/v2/invoicing/invoices/INV2-X"}]}
+    assert recipient_link(inv) == "https://www.sandbox.paypal.com/invoice/p/#ABC"
+    assert recipient_link({"links": [{"rel": "self", "href": "x"}]}) is None

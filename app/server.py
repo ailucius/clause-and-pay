@@ -66,6 +66,15 @@ def milestone(w: Workspace, code: str):
     raise HTTPException(404, f"No milestone {code} in this contract.")
 
 
+def recipient_link(inv: dict) -> Optional[str]:
+    """The page where the client views and pays the invoice. PayPal v2 puts it
+    in detail.metadata.recipient_view_url (the links array has no payer view)."""
+    url = ((inv.get("detail") or {}).get("metadata") or {}).get("recipient_view_url")
+    if url:
+        return url
+    return next((l["href"] for l in inv.get("links", []) if l.get("rel") in ("payer-view", "recipient_view")), None)
+
+
 @app.get("/")
 async def index():
     return FileResponse(ROOT / "static" / "index.html")
@@ -164,7 +173,7 @@ async def invoice(cid: str, code: str, body: InvoiceRequest):
     except PayPalError as e:
         w.note(f"PayPal refused the invoice for {code}: {e.message}", "error")
         raise HTTPException(502, f"PayPal: {e.message}")
-    link = next((l["href"] for l in inv.get("links", []) if l.get("rel") in ("payer-view", "recipient_view")), None)
+    link = recipient_link(inv)
     due = (inv.get("detail", {}).get("payment_term", {}) or {}).get("due_date")
     w.invoices[code] = {"id": inv["id"], "number": number, "status": inv.get("status"), "due_date": due, "link": link}
     w.status[code] = "invoiced"
@@ -183,6 +192,7 @@ async def refresh(cid: str, code: str):
     except PayPalError as e:
         raise HTTPException(502, f"PayPal: {e.message}")
     rec["status"] = inv.get("status")
+    rec["link"] = rec.get("link") or recipient_link(inv)
     rec["due_date"] = (inv.get("detail", {}).get("payment_term", {}) or {}).get("due_date") or rec.get("due_date")
     if rec["status"] in ("PAID", "MARKED_AS_PAID"):
         if w.status.get(code) != "paid":
