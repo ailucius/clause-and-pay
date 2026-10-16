@@ -40,7 +40,7 @@ Without PayPal keys the app still reads contracts and checks deliveries; the inv
 ## Demo walkthrough
 
 1. **Use the sample contract** (a fictional services agreement between Northwind Analytics Ltd and Harbour City Council, 3 pages, 4 milestones worth USD 48,000).
-2. Select **M1 Inception report**, paste a delivery note such as: *"Inception report emailed as PDF on 10 Dec 2026. It sets out the survey method, a sample of 1,250 passengers and a dated work plan for M2, M3 and M4. Ada Brennan accepted it in writing on 12 Dec 2026."* and press **Mark delivered and check**: three criteria met, recommendation **send**.
+2. Select **M1 Inception report**, paste a delivery note such as: *"Inception report emailed as PDF on 5 Oct 2026. It sets out the survey method, a sample of 1,250 passengers and a dated work plan for M2, M3 and M4. Ada Brennan accepted it in writing on 9 Oct 2026."* and press **Mark delivered and check**: three criteria met, recommendation **send**.
 3. Try **M2** with *"Dataset delivered with 980 survey responses. Data dictionary to follow next week."*: recommendation **hold**, because the contract asks for at least 1,200 responses and a data dictionary.
 4. For M1, enter the sandbox buyer's email and **Approve and send invoice**. Open the invoice in PayPal and pay it with the sandbox buyer, then **Check payment status**.
 5. For an unpaid invoice, set "pretend today is" to a date after the due date and **Draft a reminder**: it quotes clause 5.2 and clause 5.4 and states the interest accrued.

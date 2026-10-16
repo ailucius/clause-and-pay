@@ -43,7 +43,7 @@ def build() -> Path:
                       "network, including a passenger survey, an analysis of ticketing data and recommendations "
                       "for timetable changes."),
         clause("2.2", "The Services shall be delivered in four milestones as set out in Schedule 1 (Payment Schedule)."),
-        clause("2.3", "The Services shall start on 2 November 2026 and shall be completed no later than 30 April 2027."),
+        clause("2.3", "The Services shall start on 1 September 2026 and shall be completed no later than 26 March 2027."),
         Paragraph("3. Contract Price", H2),
         clause("3.1", "The total Contract Price is USD 48,000.00, exclusive of applicable taxes, and covers all fees "
                       "and expenses of the Supplier."),
@@ -80,10 +80,10 @@ def build() -> Path:
     ]
     rows = [
         ["Milestone", "Deliverable", "Amount (USD)", "Due"],
-        ["M1", "Inception report", "7,200.00", "15 December 2026"],
-        ["M2", "Passenger survey dataset", "14,400.00", "29 January 2027"],
-        ["M3", "Draft final report", "16,800.00", "26 March 2027"],
-        ["M4", "Final report and presentation", "9,600.00", "30 April 2027"],
+        ["M1", "Inception report", "7,200.00", "9 October 2026"],
+        ["M2", "Passenger survey dataset", "14,400.00", "27 November 2026"],
+        ["M3", "Draft final report", "16,800.00", "29 January 2027"],
+        ["M4", "Final report and presentation", "9,600.00", "26 March 2027"],
     ]
     table = Table(rows, colWidths=[22 * mm, 70 * mm, 32 * mm, 40 * mm])
     table.setStyle(TableStyle([
@@ -108,8 +108,8 @@ def build() -> Path:
                        "transport committee."),
         clause("S1.5", "Payment of each instalment is subject to clause 4.3 and clause 5.2 of this Agreement."),
         Spacer(1, 10 * mm),
-        Paragraph("Signed for Harbour City Council: Ada Brennan, Client Project Manager, 20 October 2026", SMALL),
-        Paragraph("Signed for Northwind Analytics Ltd: Tom Okafor, Director, 20 October 2026", SMALL),
+        Paragraph("Signed for Harbour City Council: Ada Brennan, Client Project Manager, 20 August 2026", SMALL),
+        Paragraph("Signed for Northwind Analytics Ltd: Tom Okafor, Director, 20 August 2026", SMALL),
     ]
     doc = SimpleDocTemplate(str(OUT), pagesize=A4, leftMargin=20 * mm, rightMargin=20 * mm,
                             topMargin=18 * mm, bottomMargin=18 * mm,

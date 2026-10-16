@@ -133,7 +133,7 @@ function renderPanel() {
   ];
 
   if (!inv) {
-    const ev = el("textarea", { id: "evidence", placeholder: "What did you deliver, and has the client accepted it? e.g. 'Inception report sent 10 Dec. Survey method, 1,250 passenger sample, dated work plan for M2 to M4. Accepted in writing by Ada Brennan on 12 Dec.'" });
+    const ev = el("textarea", { id: "evidence", placeholder: "What did you deliver, and has the client accepted it? e.g. 'Inception report sent 5 Oct. Survey method, 1,250 passenger sample, dated work plan for M2 to M4. Accepted in writing by Ada Brennan on 9 Oct.'" });
     const checkBtn = el("button", { class: "btn primary", onclick: async () => {
       err.textContent = ""; busy(checkBtn, true, "Checking against the contract...");
       try { W = await post(`/api/contracts/${W.id}/milestones/${m.code}/deliver`, { evidence: ev.value }); render(); }

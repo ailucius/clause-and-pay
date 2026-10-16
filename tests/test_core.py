@@ -44,7 +44,7 @@ def test_invented_quote_is_not_found(pages):
 
 
 def test_table_row_quote_verifies(pages):
-    assert check_quote("M2 Passenger survey dataset 14,400.00 29 January 2027", 3, pages).ok
+    assert check_quote("M2 Passenger survey dataset 14,400.00 27 November 2026", 3, pages).ok
 
 
 def test_too_short_quote_is_empty(pages):
@@ -80,12 +80,12 @@ def _raw(**over):
         late_payment=ClauseOut(summary="1.5% a month", quote="interest shall accrue on the overdue amount at the rate of 1.5% per month from the due date until the date of payment", page=2),
         invoice_condition=None,
         milestones=[
-            MilestoneOut(code="M1", name="Inception report", amount="7,200.00", currency="USD", due_as_written="15 December 2026",
-                         due_date_iso="2026-12-15", payment_quote="M1 Inception report 7,200.00 15 December 2026", payment_page=3,
+            MilestoneOut(code="M1", name="Inception report", amount="7,200.00", currency="USD", due_as_written="9 October 2026",
+                         due_date_iso="2026-10-09", payment_quote="M1 Inception report 7,200.00 9 October 2026", payment_page=3,
                          acceptance_criteria=["survey method", "sample of at least 1,200"],
                          acceptance_quote="the report shall set out the survey method, a sample size of at least 1,200 passengers", acceptance_page=3),
-            MilestoneOut(code="M2", name="Dataset", amount="14,400.00", currency="USD", due_as_written="29 January 2027",
-                         due_date_iso="2027-01-29", payment_quote="M2 costs 99,999.00 according to nobody", payment_page=3,
+            MilestoneOut(code="M2", name="Dataset", amount="14,400.00", currency="USD", due_as_written="27 November 2026",
+                         due_date_iso="2026-11-27", payment_quote="M2 costs 99,999.00 according to nobody", payment_page=3,
                          acceptance_criteria=["1,200 responses"]),
         ])
     base.update(over)
