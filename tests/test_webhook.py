@@ -45,7 +45,7 @@ def test_verified_paid_event_marks_the_milestone_paid(client, monkeypatch):
     r = client.post("/api/paypal/webhook", content=json.dumps(_event()), headers={"Content-Type": "application/json"})
     assert r.status_code == 200 and r.json()["matched"] == "M1"
     assert w.status["M1"] == "paid" and w.invoices["M1"]["status"] == "PAID"
-    assert "Paid through PayPal (webhook)" in w.log[-1]["text"]
+    assert "(signature verified)" in w.log[-1]["text"]
     assert fake.calls[0][0] == "WH-ID-TEST"
 
 
@@ -72,7 +72,7 @@ def test_duplicate_event_is_applied_once(client, monkeypatch):
         r = client.post("/api/paypal/webhook", content=json.dumps(_event(eid="WH-DUP")))
         assert r.status_code == 200
     assert r.json().get("duplicate") is True
-    assert sum("Paid through PayPal" in n["text"] for n in w.log) == 1
+    assert sum("(signature verified)" in n["text"] for n in w.log) == 1
 
 
 def test_updated_event_with_paid_status_counts_and_resource_may_be_the_invoice(client, monkeypatch):

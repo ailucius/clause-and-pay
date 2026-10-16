@@ -266,7 +266,7 @@ async def refresh(cid: str, code: str):
     rec["due_date"] = (inv.get("detail", {}).get("payment_term", {}) or {}).get("due_date") or rec.get("due_date")
     if rec["status"] in ("PAID", "MARKED_AS_PAID"):
         if w.status.get(code) != "paid":
-            w.note(f"{code} paid: invoice {rec['number']}.", "ok")
+            w.note(f"PayPal reports invoice {rec['number']} paid. {code} marked paid.", "ok")
         w.status[code] = "paid"
     return w.model_dump()
 
@@ -326,7 +326,7 @@ def apply_invoice_event(event: dict) -> Optional[str]:
                 rec["status"] = status if status in PAID_STATES else "PAID"
                 if w.status.get(code) != "paid":
                     w.status[code] = "paid"
-                    w.note(f"{code} paid: invoice {rec['number']}. Paid through PayPal (webhook).", "ok")
+                    w.note(f"PayPal webhook {etype} (signature verified): invoice {rec['number']} paid. {code} marked paid.", "ok")
             elif etype == "INVOICING.INVOICE.CANCELLED":
                 if rec.get("status") != "CANCELLED":
                     rec["status"] = "CANCELLED"
