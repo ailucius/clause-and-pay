@@ -290,9 +290,9 @@ function watchPayments() {
   }, 10000);
 }
 
-async function start(promise) {
+async function start(promise, name = "the contract") {
   const msg = $("#startmsg");
-  msg.textContent = "Reading the contract and checking every quote against its page...";
+  msg.textContent = `Reading ${name} and checking every quote against its page...`;
   $("#sample").disabled = true;
   try { W = await promise; render(); }
   catch (e) { msg.textContent = e.message; }
@@ -303,7 +303,7 @@ $("#sample").addEventListener("click", () => start(post("/api/contracts/sample")
 $("#file").addEventListener("change", (ev) => {
   const f = ev.target.files[0]; if (!f) return;
   const fd = new FormData(); fd.append("file", f);
-  start(api("/api/contracts", { method: "POST", body: fd }));
+  start(api("/api/contracts", { method: "POST", body: fd }), f.name);
 });
 
 api("/api/config").then((c) => { CFG = c; renderStatus(); }).catch(() => renderStatus());
