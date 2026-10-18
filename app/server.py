@@ -123,7 +123,8 @@ def recipient_link(inv: dict) -> Optional[str]:
     return next((l["href"] for l in inv.get("links", []) if l.get("rel") in ("payer-view", "recipient_view")), None)
 
 
-@app.get("/")
+# GET and HEAD: link checkers and preview bots ask with HEAD first.
+@app.api_route("/", methods=["GET", "HEAD"])
 async def index():
     return FileResponse(ROOT / "static" / "index.html")
 
