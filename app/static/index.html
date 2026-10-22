@@ -6,6 +6,9 @@
 <title>Clause &amp; Pay</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f3a5f'/%3E%3Cpath d='M9 10h14M9 16h10M9 22h7' stroke='%23e9eef5' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
+<!-- AG Grid Community (MIT), pinned and checked with its hash: the schedule, invoice and ledger tables. -->
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@36.2.0/dist/ag-grid-community.min.js"
+  integrity="sha384-icvtRKM0YJJgeDhXnWY8UlF1PVBFd4K8Pj61la+vG+EU+awBeoP0xGPZhCD2SQOV" crossorigin="anonymous"></script>
 <meta name="description" content="Invoices that read the contract first: every payment milestone with its amount, due date and acceptance criteria, quoted from the contract's own page, then billed on PayPal.">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Clause &amp; Pay">
@@ -48,8 +51,9 @@
       <div class="col">
         <div class="card" id="summary"></div>
         <div class="card">
-          <h2>Payment schedule</h2>
-          <ol class="timeline" id="timeline"></ol>
+          <div class="cardhead"><h2>Payment schedule</h2><span class="hint">Select a milestone</span></div>
+          <div id="msgrid" class="aggrid" role="region" aria-label="Payment schedule"></div>
+          <ol class="timeline" id="timeline" hidden></ol>
         </div>
       </div>
       <div class="col">
@@ -61,11 +65,32 @@
         </div>
       </div>
     </div>
+    <div class="card" id="books">
+      <div class="cardhead">
+        <h2>Invoices and ledger</h2>
+        <div class="tabs" role="tablist" aria-label="Invoices and ledger">
+          <button class="tab" id="tab-inv" role="tab" aria-selected="true" aria-controls="invpane">Invoices</button>
+          <button class="tab" id="tab-led" role="tab" aria-selected="false" aria-controls="ledpane" tabindex="-1">Ledger</button>
+        </div>
+      </div>
+      <div id="invpane" role="tabpanel" aria-labelledby="tab-inv">
+        <p class="hint">Every PayPal invoice on this contract, with its status, due date, reminders and payment.</p>
+        <div id="invgrid" class="aggrid"></div>
+      </div>
+      <div id="ledpane" role="tabpanel" aria-labelledby="tab-led" hidden>
+        <p class="hint">Every invoice event, with its amount and time: drafted, sent, reminded, paid, and any hold you overrode with your reason. Events come from this app's own calls to PayPal and from PayPal's signed webhook.</p>
+        <div class="row tools-row">
+          <input type="search" id="ledsearch" placeholder="Search the ledger" aria-label="Search the ledger">
+          <button class="btn" id="ledcsv" type="button">Download CSV</button>
+        </div>
+        <div id="ledgrid" class="aggrid"></div>
+      </div>
+    </div>
   </section>
 </main>
 
 <footer class="foot">
-  Sample contract and parties are fictional. Invoices go to the PayPal sandbox; no real money moves.
+  Sample contract, evidence and parties are fictional. Invoices go to the PayPal sandbox; no real money moves. Tables by AG Grid Community.
 </footer>
 <script src="/static/app.js"></script>
 </body>
