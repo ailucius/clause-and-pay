@@ -41,12 +41,15 @@ def _strip_ends(q: str) -> str:
     return q.strip().strip('"\'').rstrip(".;:, ").strip()
 
 
-def check_quote(quote: str, cited_page: int | None, pages: list[str]) -> QuoteCheck:
-    """`pages` holds the text of each page, index 0 = page 1."""
+def check_quote(quote: str, cited_page: int | None, pages: list[str],
+                norm_pages: list[str] | None = None) -> QuoteCheck:
+    """`pages` holds the text of each page, index 0 = page 1. `norm_pages`, when given,
+    is the same pages already normalised (to check many quotes against one document)."""
     q = normalise(_strip_ends(quote))
     if len(q) < 8:
         return QuoteCheck("empty", cited_page)
-    norm_pages = [normalise(p) for p in pages]
+    if norm_pages is None:
+        norm_pages = [normalise(p) for p in pages]
     if cited_page and 1 <= cited_page <= len(pages) and q in norm_pages[cited_page - 1]:
         return QuoteCheck("verified", cited_page)
     for i, p in enumerate(norm_pages, start=1):

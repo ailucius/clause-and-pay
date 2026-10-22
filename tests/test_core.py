@@ -249,14 +249,16 @@ def test_demo_limits_refuse_after_the_hourly_allowance():
     from app import server
 
     class Req:
-        headers = {"x-forwarded-for": "203.0.113.9, 10.0.0.1"}
+        def __init__(self, spoofed="198.51.100.7"):
+            # the client sent the first entry; Google's front end appended the last
+            self.headers = {"x-forwarded-for": f"{spoofed}, 203.0.113.9"}
         client = None
 
     server._hits.clear()
     limit, _ = server.LIMITS["paypal"]
-    for _ in range(limit):
-        server.spend(Req(), "paypal")
+    for i in range(limit):
+        server.spend(Req(spoofed=f"10.9.9.{i}"), "paypal")  # a new made-up address each time
     with pytest.raises(HTTPException) as e:
-        server.spend(Req(), "paypal")
+        server.spend(Req(spoofed="10.0.0.250"), "paypal")
     assert e.value.status_code == 429
     assert server.client_ip(Req()) == "203.0.113.9"

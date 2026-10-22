@@ -380,7 +380,8 @@ const CHECK_STEPS = [
   [12, "Still checking ({s} s). Every quote is matched against the file's own text."],
   [30, "Taking longer than usual ({s} s). Large files and images take longest."],
 ];
-const VERDICT_WORDS = { met: "Met", not_met: "Not met", not_shown: "Not shown" };
+const VERDICT_WORDS = { met: "Met", not_met: "Not met", not_shown: "Not shown", unchecked: "Confirm by eye" };
+const ADVICE = "This check is advice, not a decision. The model can be wrong, and a file can be written to mislead it: a quote found in the file shows the words are there, not that they are true. Read the quotes, then decide.";
 const QUOTE_WORDS = {
   verified: ["ok", "Found in the file"], moved: ["ok", "Found in the file"],
   not_found: ["bad", "Not found in the file"], too_short: ["bad", "Too short to check"],
@@ -389,6 +390,7 @@ const QUOTE_WORDS = {
 
 function evidenceResult(check) {
   const met = check.criteria.filter((c) => c.verdict === "met").length;
+  const unchecked = check.criteria.filter((c) => c.verdict === "unchecked").length;
   const f = check.file;
   const fileLine = `${f.name} (${f.label}${f.pages ? `, ${f.pages} page${f.pages === 1 ? "" : "s"}` : ""}, ${kb(f.size)})`
     + (check.evidence_kind ? `: ${check.evidence_kind}` : "");
@@ -396,7 +398,8 @@ function evidenceResult(check) {
     el("strong", {}, check.recommendation === "send" ? "Ready to invoice" : "Hold the invoice"),
     el("p", { class: "filemeta" }, `Checked ${fileLine}. The file was read for this check and not kept.`),
     el("p", {}, check.summary),
-    el("p", { class: "count" }, `${met} of ${check.criteria.length} met`),
+    check.criteria.length ? el("p", { class: "count" }, `${met} of ${check.criteria.length} met`
+      + (unchecked ? `, ${unchecked} to confirm by eye` : "")) : null,
     el("ol", { class: "items" }, ...check.criteria.map((c) => {
       const [qcls, qword] = QUOTE_WORDS[c.quote_status] || [];
       return el("li", {},
@@ -408,7 +411,8 @@ function evidenceResult(check) {
           f.text_checked && c.page ? el("span", { class: "page" }, `page ${c.page}`) : null,
           qword ? el("span", { class: `ver ${qcls}` }, qword) : null) : null,
         c.reason ? el("p", { class: "hint reason" }, c.reason) : null);
-    })));
+    })),
+    el("p", { class: "advice" }, ADVICE));
 }
 
 function noteResult(check) {
@@ -416,7 +420,8 @@ function noteResult(check) {
     el("strong", {}, check.recommendation === "send" ? "Ready to invoice" : "Hold the invoice"),
     el("p", { class: "filemeta" }, "Checked your delivery note."),
     el("p", {}, check.summary),
-    el("ul", {}, ...check.criteria.map((c) => el("li", {}, `${c.met.toUpperCase()}: ${c.criterion}. ${c.evidence}`))));
+    el("ul", {}, ...check.criteria.map((c) => el("li", {}, `${c.met.toUpperCase()}: ${c.criterion}. ${c.evidence}`))),
+    el("p", { class: "advice" }, ADVICE));
 }
 
 function evidenceForm(m, err) {
@@ -465,7 +470,7 @@ function evidenceForm(m, err) {
   const pick = el("label", { class: `btn primary ${CFG.ai ? "" : "disabled"}`, for: "evfile" }, "Choose an evidence file");
   const samples = SAMPLES.slice().sort((a, b) => (b.code === m.code) - (a.code === m.code));
   const form = el("div", { class: "evform" },
-    el("p", { class: "hint" }, "The client's acceptance email, a signed certificate or the deliverable itself: PDF, PNG, JPEG or Word (.docx), up to 8 MB. The agent checks it against this milestone's acceptance criteria and quotes the file's own words. The file is read for the check, never stored or shown."),
+    el("p", { class: "hint" }, "The client's acceptance email, a signed certificate or the deliverable itself: PDF, PNG, JPEG or Word (.docx), up to 8 MB. The agent checks it against this milestone's acceptance criteria and quotes the file's own words; words from a PDF or Word file are checked against its text, an image's are yours to confirm by eye. The file is read for the check, never stored or shown."),
     el("div", { class: "row" }, input, pick, chosen),
     el("div", { class: "samples" }, el("span", { class: "hint" }, "Or try a fictional sample:"),
       ...samples.map((s) => el("button", { type: "button", class: "chip", disabled: !CFG.ai, onclick: async () => {
@@ -485,7 +490,7 @@ function evidenceForm(m, err) {
 
 function invoiceForm(m, state, err) {
   const email = el("input", { type: "email", id: "recipient", autocomplete: "off", placeholder: "client's PayPal email (sandbox buyer)" });
-  const reason = el("textarea", { id: "reason", rows: "2", placeholder: "e.g. The client confirmed acceptance by phone; their written email follows today." });
+  const reason = el("textarea", { id: "reason", rows: "2", placeholder: "e.g. I read the signed certificate: it accepts M1 in writing on 9 October." });
   const reasonBox = el("div", { hidden: true }, el("label", { class: "f", for: "reason" }, "Why send it over the hold? (recorded in the ledger)"), reason);
   const override = state === "held" ? el("input", { type: "checkbox", id: "override" }) : null;
   const sync = () => {
@@ -506,7 +511,7 @@ function invoiceForm(m, state, err) {
   if (override) { override.addEventListener("change", sync); reason.addEventListener("input", sync); }
   return [
     el("label", { class: "f", for: "recipient" }, "Send the invoice to"), email,
-    override ? el("label", { class: "check", for: "override" }, override, el("span", {}, "Send anyway: the evidence does not meet every item, and I take responsibility")) : null,
+    override ? el("label", { class: "check", for: "override" }, override, el("span", {}, "Send anyway: I have read the evidence myself and take responsibility")) : null,
     reasonBox,
     el("div", { class: "row" }, send),
     !CFG.paypal && el("p", { class: "hint" }, "PayPal is not configured on this server, so invoices cannot be sent. Add sandbox keys (see the README)."),

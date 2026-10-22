@@ -55,10 +55,10 @@ class Workspace(BaseModel):
         self.log.append({"at": _now(), "kind": kind, "text": text})
 
     def record(self, event: str, code: str, *, source: str, rec: Optional[dict] = None,
-               amount: Optional[str] = None, detail: str = "") -> dict:
+               amount: Optional[str] = None, detail: str = "", at: Optional[str] = None) -> dict:
         """Add one invoice event to the ledger. `rec` is the milestone's invoice record."""
         rec = rec or self.invoices.get(code) or {}
-        entry = {"at": _now(), "event": event, "code": code, "invoice": rec.get("number"),
+        entry = {"at": at or _now(), "event": event, "code": code, "invoice": rec.get("number"),
                  "invoice_id": rec.get("id"), "amount": amount if amount is not None else rec.get("amount"),
                  "currency": rec.get("currency"), "source": source, "detail": detail}
         self.ledger.append(entry)
@@ -82,19 +82,30 @@ STORE: dict[str, Workspace] = {}
 MAX_WORKSPACES = int(os.environ.get("MAX_WORKSPACES", "300"))
 
 # Usage limits for a public demo (per visitor IP, rolling hour; and per day for
-# the whole server). Each AI call and each PayPal send counts once.
+# the whole server). Each AI call, each PayPal send and each evidence upload counts once.
 LIMITS = {
     "ai": (int(os.environ.get("AI_CALLS_PER_HOUR_PER_IP", "20")), 3600),
     "paypal": (int(os.environ.get("PAYPAL_SENDS_PER_HOUR_PER_IP", "15")), 3600),
+    # counted before an upload is even parsed, so refused files cannot be sent without end
+    "upload": (int(os.environ.get("EVIDENCE_UPLOADS_PER_HOUR_PER_IP", "30")), 3600),
 }
-DAILY_AI_CAP = int(os.environ.get("AI_CALLS_PER_DAY", "300"))
+DAILY_CAPS = {
+    "ai": (int(os.environ.get("AI_CALLS_PER_DAY", "300")), "The demo has reached today's limit for AI reads. It resets tomorrow."),
+    "paypal": (int(os.environ.get("PAYPAL_SENDS_PER_DAY", "200")), "The demo has reached today's limit for PayPal sends. It resets tomorrow."),
+}
+# How many proxies in front of the app append to X-Forwarded-For. On Cloud Run, Google's
+# front end appends the address it saw as the last entry; everything before it is
+# whatever the client sent, so it is never trusted.
+TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "1"))
 _hits: dict[tuple[str, str], deque] = defaultdict(deque)
-_daily: dict[str, int] = defaultdict(int)
+_daily: dict[tuple[str, str], int] = defaultdict(int)
 
 
 def client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    return (fwd.split(",")[0].strip() if fwd else "") or (request.client.host if request.client else "unknown")
+    fwd = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+    if fwd and TRUSTED_PROXY_HOPS > 0:
+        return fwd[-min(TRUSTED_PROXY_HOPS, len(fwd))]
+    return request.client.host if request.client else "unknown"
 
 
 def spend(request: Request, kind: str) -> None:
@@ -106,10 +117,11 @@ def spend(request: Request, kind: str) -> None:
         q.popleft()
     if len(q) >= limit:
         raise HTTPException(429, "This demo limits how often one visitor can run that step. Try again in a little while.")
-    if kind == "ai":
-        day = date.today().isoformat()
-        if _daily[day] >= DAILY_AI_CAP:
-            raise HTTPException(429, "The demo has reached today's limit for AI reads. It resets tomorrow.")
+    if kind in DAILY_CAPS:
+        cap, message = DAILY_CAPS[kind]
+        day = (date.today().isoformat(), kind)
+        if _daily[day] >= cap:
+            raise HTTPException(429, message)
         _daily[day] += 1
     q.append(now)
 
@@ -253,6 +265,7 @@ async def deliver(cid: str, code: str, body: Delivery, request: Request):
     spend(request, "ai")
     check = await _timed(agent.check_delivery(w.schedule, m, body.evidence), CHECK_TIMEOUT,
                          "The delivery check took too long. Try again.")
+    not_invoiced(w, code)  # an invoice sent while the check ran is not undone by its result
     w.checks[code] = {**check.model_dump(), "kind": "note"}
     w.status[code] = "delivered" if check.recommendation == "send" else "held"
     w.note(f"{code} marked delivered. Agent recommends {check.recommendation.upper()}: {check.summary}",
@@ -275,6 +288,7 @@ async def deliver_file(cid: str, code: str, request: Request):
         raise HTTPException(411, "Send the file with its length.")
     if length > evidence.MAX_EVIDENCE_BYTES + 64 * 1024:
         raise HTTPException(413, f"The evidence file is larger than {evidence.MAX_EVIDENCE_BYTES // (1024 * 1024)} MB.")
+    spend(request, "upload")
     try:
         form = await request.form(max_files=1, max_fields=1)
     except Exception:
@@ -283,8 +297,8 @@ async def deliver_file(cid: str, code: str, request: Request):
     if up is None or isinstance(up, str):
         raise HTTPException(400, "Send one evidence file.")
     data = await up.read(evidence.MAX_EVIDENCE_BYTES + 1)
-    try:
-        ev = evidence.load_evidence(data, up.filename)
+    try:  # opening and reading the file is CPU work: off the event loop
+        ev = await asyncio.to_thread(evidence.load_evidence, data, up.filename)
     except evidence.EvidenceError as e:
         raise HTTPException(e.status, e.message)
     finally:
@@ -300,10 +314,13 @@ async def deliver_file(cid: str, code: str, request: Request):
     except Exception as e:
         log.warning("evidence check failed for %s: %s", code, str(e)[:200])
         raise HTTPException(502, "The model could not read that file just now. Try again, or try a PDF.")
+    not_invoiced(w, code)  # an invoice sent while the check ran is not undone by its result
     w.checks[code] = check.model_dump()
     w.status[code] = "delivered" if check.recommendation == "send" else "held"
     met = sum(1 for c in check.criteria if c.verdict == "met")
-    w.note(f"{code}: evidence file {ev.name} checked, {met} of {len(check.criteria)} items met. "
+    unchecked = sum(1 for c in check.criteria if c.verdict == "unchecked")
+    w.note(f"{code}: evidence file {ev.name} checked, {met} of {len(check.criteria)} items met"
+           + (f", {unchecked} to confirm by eye" if unchecked else "") + ". "
            f"Agent recommends {check.recommendation.upper()}.", "ok" if check.recommendation == "send" else "warn")
     return w.model_dump()
 
@@ -350,32 +367,36 @@ async def invoice(cid: str, code: str, body: InvoiceRequest, request: Request):
     amount, rec = str(Decimal(m.amount).quantize(Decimal("0.01"))), None
     try:
         number = await pp.next_invoice_number()
-        if overridden:  # the decision comes first in the ledger, with its reason
-            w.record("override", code, rec={"number": number, "amount": amount, "currency": m.currency},
-                     source="You", detail=f"Invoiced over the agent's hold. Reason: {reason}")
         payload = agent.invoice_payload(w.schedule, m, invoice_number=number,
                                         recipient_email=body.recipient_email, invoice_date=date.today(),
                                         invoicer_email=os.environ.get("PAYPAL_INVOICER_EMAIL") or None)
         inv = await pp.create_draft(payload)
+        drafted_at = _now()
         rec = {"id": inv["id"], "number": number, "status": inv.get("status"), "amount": amount,
                "currency": m.currency, "invoice_date": payload["detail"]["invoice_date"],
                "recipient": body.recipient_email, "reminders": 0}
-        w.record("drafted", code, rec=rec, source="App: PayPal Invoicing API (create draft)",
-                 detail=f"Draft {number} created for {body.recipient_email}.")
         subject = f"{w.schedule.contract_reference or w.schedule.contract_title}: invoice for {m.code}"
         await pp.send(inv["id"], subject=subject)
         inv = await pp.get(inv["id"])
     except PayPalError as e:
-        w.note(f"PayPal refused the invoice for {code}: {e.message}", "error")
+        left = f" Draft {rec['number']} stays in PayPal, unsent." if rec else ""
+        w.note(f"PayPal refused the invoice for {code}: {e.message}.{left}", "error")
         raise HTTPException(502, f"PayPal: {e.message}")
     except httpx.HTTPError:
-        w.note(f"PayPal could not be reached while invoicing {code}.", "error")
+        left = f" Draft {rec['number']} stays in PayPal, unsent." if rec else ""
+        w.note(f"PayPal could not be reached while invoicing {code}.{left}", "error")
         raise HTTPException(502, "PayPal could not be reached. Try again.")
     rec.update(status=inv.get("status"), link=recipient_link(inv), sent_at=_now(),
                due_date=(inv.get("detail", {}).get("payment_term", {}) or {}).get("due_date"))
+    # The ledger gets the invoice's events only once it is sent and recorded, so a
+    # failed attempt and its retry never leave two sets of entries.
     if overridden:
         rec["override_reason"] = reason
+        w.record("override", code, rec=rec, source="You", at=drafted_at,
+                 detail=f"Invoiced over the agent's hold. Reason: {reason}")
     w.invoices[code] = rec
+    w.record("drafted", code, source="App: PayPal Invoicing API (create draft)", at=drafted_at,
+             detail=f"Draft {number} created for {body.recipient_email}.")
     w.record("sent", code, source="App: PayPal Invoicing API (send)",
              detail=f"Sent to {body.recipient_email}" + (f", due {_long(rec['due_date'])}." if rec.get("due_date") else "."))
     w.status[code] = "invoiced"

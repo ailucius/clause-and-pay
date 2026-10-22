@@ -49,6 +49,7 @@ def workspace(schedule):
     """A fresh workspace for the sample contract in the server's store; demo limits reset."""
     server.STORE.clear()
     server._hits.clear()
+    server._daily.clear()
     server._seen_events.clear()
     w = server.Workspace(id="abcdef123456", filename=SAMPLE.name, schedule=schedule,
                          status={m.code: "planned" for m in schedule.milestones})

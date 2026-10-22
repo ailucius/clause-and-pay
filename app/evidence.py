@@ -9,11 +9,17 @@ Gemini judges the file against the milestone's quoted acceptance criteria (and t
 contract's condition for invoicing), item by item: met, not met or not shown, with the
 evidence's own words. For a file with text (a PDF with a text layer, a Word file) every
 quote is checked against that text by code, and a "met" whose words are not in the file
-does not count. An image or a scanned PDF is read by the model; its quotes are marked
-as not text-checked. The invoice is offered only when every item is met.
+does not count. An image or a scanned PDF is read by the model; nothing it reads there can
+be checked by code, so such an item is marked "confirm by eye" and never counts as met by
+itself. The invoice is offered only when every item is met.
+
+The check is advice, not a decision: the model can be wrong, and a file can be written to
+mislead it (a quote found in the file proves the words are there, not that they are true).
+The person reads the quotes and decides; the override, with a reason, stays theirs.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import io
@@ -27,11 +33,12 @@ from pydantic import BaseModel, Field
 
 from .llm import generate_json
 from .schedule import Milestone, Schedule
-from .verify import check_quote
+from .verify import check_quote, normalise
 
 MAX_EVIDENCE_BYTES = 8 * 1024 * 1024
 MAX_EVIDENCE_PAGES = 30
-MAX_TEXT_CHARS = 60_000           # evidence text sent to the model
+MAX_TEXT_CHARS = 60_000           # evidence text sent to the model and checked against
+MAX_RAW_TEXT = 200_000            # characters taken from a file before any clean-up
 MAX_DOCX_XML = 8 * 1024 * 1024    # word/document.xml, uncompressed
 MAX_ZIP_ENTRIES = 1000
 MAX_IMAGE_SIDE = 12_000
@@ -128,8 +135,20 @@ def image_size(data: bytes, kind: str) -> Optional[tuple[int, int]]:
     return _png_size(data) if kind == "png" else _jpeg_size(data)
 
 
-_DOCX_TOKENS = re.compile(r"<w:t(?:\s[^>]*)?>([^<]*)</w:t>|<w:tab\s*/>|<w:(?:br|cr)\b[^>]*/>"
-                          r"|</w:p>|<w:tc(?:\s[^>]*)?>|</w:tc>|</w:tr>")
+# Attribute parts are bounded, so a tag that never closes cannot make each match scan
+# the rest of the file; text parts stop at the next "<". The scan stays linear.
+_DOCX_TOKENS = re.compile(r"<w:t(?:\s[^<>]{0,300})?>([^<]*)</w:t>|<w:tab\s*/>|<w:(?:br|cr)\b[^<>]{0,300}/>"
+                          r"|</w:p>|<w:tc(?:\s[^<>]{0,300})?>|</w:tc>|</w:tr>")
+
+
+def tidy_text(text: str) -> str:
+    """Bounded, linear clean-up of text taken from a file: at most MAX_RAW_TEXT characters
+    are looked at, runs of spaces and tabs become one space (one pass, no backtracking),
+    lines are trimmed, blank lines are kept to one, and MAX_TEXT_CHARS are kept."""
+    text = re.sub(r"[^\S\n]{2,}", " ", text[:MAX_RAW_TEXT])
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()[:MAX_TEXT_CHARS]
 
 
 def docx_text(data: bytes) -> str:
@@ -161,26 +180,24 @@ def docx_text(data: bytes) -> str:
         if len(xml) > MAX_DOCX_XML:
             raise EvidenceError(422, "The Word file is too large to read.")
     out: list[str] = []
-    in_cell = 0  # a table row reads as one line, its cells separated by tabs
+    size = 0
+    in_cell = 0  # a table row reads as one line, its cells separated by spaces
     for m in _DOCX_TOKENS.finditer(xml.decode("utf-8", errors="replace")):
+        if size > MAX_RAW_TEXT:
+            break
         tok = m.group(0)
         if m.group(1) is not None:
-            out.append(html.unescape(m.group(1)))
-        elif tok.startswith("<w:tab"):
-            out.append("\t")
+            piece = html.unescape(m.group(1)[:MAX_RAW_TEXT])
+            out.append(piece)
+            size += len(piece)
         elif tok.startswith("<w:tc"):
             in_cell += 1
-        elif tok == "</w:tc>":
-            in_cell = max(0, in_cell - 1)
-            out.append("\t")
-        elif tok == "</w:p>" and in_cell:
-            out.append(" ")
         else:
-            out.append("\n")
-    text = "".join(out)
-    text = re.sub(r" +\t", "\t", text)
-    text = re.sub(r"[ \t]+\n", "\n", text)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
+            if tok == "</w:tc>":
+                in_cell = max(0, in_cell - 1)
+            out.append("\t" if tok.startswith("<w:tab") or tok == "</w:tc>" else " " if tok == "</w:p>" and in_cell else "\n")
+            size += 1
+    return tidy_text("".join(out))
 
 
 def load_evidence(data: bytes, filename: Optional[str]) -> EvidenceFile:
@@ -209,7 +226,11 @@ def load_evidence(data: bytes, filename: Optional[str]) -> EvidenceFile:
             if doc.page_count > MAX_EVIDENCE_PAGES:
                 raise EvidenceError(422, f"The PDF has {doc.page_count} pages; the limit for evidence is {MAX_EVIDENCE_PAGES}.")
             ev.page_count = doc.page_count
-            pages = [p.get_text() for p in doc]
+            pages, total = [], 0
+            for page in doc:  # the text the model sees and quotes are checked against, bounded
+                t = tidy_text(page.get_text())[:max(0, MAX_TEXT_CHARS - total)]
+                total += len(t)
+                pages.append(t)
         finally:
             doc.close()
         # A text layer worth checking quotes against; otherwise a scan the model reads itself.
@@ -251,7 +272,7 @@ class EvidenceCheckOut(BaseModel):
 class EvidenceItem(BaseModel):
     criterion: str
     source: str            # acceptance | condition
-    verdict: str           # met | not_met | not_shown
+    verdict: str           # met | not_met | not_shown | unchecked (the model read "met" from an image or scan: confirm by eye)
     quote: str = ""
     page: Optional[int] = None
     quote_status: str = "none"  # verified | moved | not_found | too_short | not_text_checked | none
@@ -351,20 +372,34 @@ def file_info(ev: EvidenceFile) -> EvidenceFileInfo:
                             sha256=ev.sha256[:16], text_checked=ev.text_checked)
 
 
+UNCHECKED_NOTE = ("This file is an image or a scan, so the model's reading cannot be checked against its text. "
+                  "Confirm each item by eye; if it is right, send with the override and say so.")
+
+
 async def check_evidence(s: Schedule, m: Milestone, ev: EvidenceFile) -> EvidenceCheck:
+    """The model's answers, then the code's own checks of them. The result is advice:
+    a person reads the quotes and decides."""
     items = items_for(s, m)
-    if not items:
+    if not any(source == "acceptance" for _, source in items):
         return EvidenceCheck(file=file_info(ev), recommendation="hold", criteria=[],
-                             summary="The contract lists no acceptance criteria for this milestone, so the file "
-                                     "cannot be checked against them. Read it yourself before invoicing.")
+                             summary="The contract lists no acceptance criteria for this milestone, so there is "
+                                     "nothing to check the file against. Read it yourself and decide.")
     out = await generate_json(build_prompt(s, m, ev, items), EvidenceCheckOut,
                               attachments=None if ev.text_checked else [(ev.data, ev.mime)])
+    # Matching quotes against the file's text is CPU work: off the event loop.
+    return await asyncio.to_thread(judge, items, out, ev)
+
+
+def judge(items: list[tuple[str, str]], out: EvidenceCheckOut, ev: EvidenceFile) -> EvidenceCheck:
+    """Turn the model's answers into the checked result. An item counts as met only when
+    the model says met AND its quote is found in the file's own text."""
     answers: dict[int, EvidenceItemOut] = {}
     for a in out.items:
         if 1 <= a.index <= len(items) and a.index not in answers:
             answers[a.index] = a
+    norm_pages = [normalise(p) for p in ev.pages] if ev.text_checked else []
     results: list[EvidenceItem] = []
-    not_backed = 0
+    not_backed = unchecked = 0
     for i, (text, source) in enumerate(items, start=1):
         a = answers.get(i)
         if a is None:
@@ -376,7 +411,7 @@ async def check_evidence(s: Schedule, m: Milestone, ev: EvidenceFile) -> Evidenc
         page, status = None, "none"  # a page only for a quote, and never for a Word file
         if quote:
             if ev.text_checked:
-                chk = check_quote(quote, a.page if ev.kind == "pdf" else 1, ev.pages)
+                chk = check_quote(quote, a.page if ev.kind == "pdf" else 1, ev.pages, norm_pages)
                 status = "too_short" if chk.status == "empty" else chk.status
                 page = chk.page if ev.kind == "pdf" else None
             else:
@@ -385,7 +420,10 @@ async def check_evidence(s: Schedule, m: Milestone, ev: EvidenceFile) -> Evidenc
         if verdict == "met" and not quote:
             verdict, not_backed = "not_shown", not_backed + 1
             reason = "Marked met without quoting the evidence, so it is not counted. " + reason
-        elif verdict == "met" and ev.text_checked and status not in ("verified", "moved"):
+        elif verdict == "met" and not ev.text_checked:
+            verdict, unchecked = "unchecked", unchecked + 1
+            reason = "The model read this from the image; its words cannot be checked against text. Confirm by eye. " + reason
+        elif verdict == "met" and status not in ("verified", "moved"):
             verdict, not_backed = "not_shown", not_backed + 1
             reason = "The quoted words were not found in the file, so this is not counted as met. " + reason
         results.append(EvidenceItem(criterion=text, source=source, verdict=verdict, quote=quote,
@@ -395,5 +433,7 @@ async def check_evidence(s: Schedule, m: Milestone, ev: EvidenceFile) -> Evidenc
     if not_backed:
         summary = (summary + " " if summary else "") + (
             "Some answers were not backed by words found in the file and are not counted as met.")
+    if unchecked:
+        summary = (summary + " " if summary else "") + UNCHECKED_NOTE
     return EvidenceCheck(file=file_info(ev), evidence_kind=" ".join((out.evidence_kind or "").split())[:80],
                          recommendation=rec, criteria=results, summary=summary)

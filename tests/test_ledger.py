@@ -177,3 +177,36 @@ def test_paypal_out_of_reach_answers_502(workspace, fake_paypal, client, monkeyp
     r = _invoice(client)
     assert r.status_code == 502 and "could not be reached" in r.json()["detail"]
     assert "M1" not in workspace.invoices and workspace.status["M1"] == "delivered"
+
+
+def test_a_failed_send_leaves_no_ledger_entries_and_a_retry_leaves_one_set(workspace, fake_paypal, client, monkeypatch):
+    from app.paypal_client import PayPalError
+    real_send = fake_paypal.send
+    fails = {"left": 1}
+
+    async def flaky(invoice_id, subject=None, note=None):
+        if fails["left"]:
+            fails["left"] -= 1
+            raise PayPalError(500, "INTERNAL_SERVICE_ERROR", "try later")
+        await real_send(invoice_id, subject=subject, note=note)
+
+    monkeypatch.setattr(fake_paypal, "send", flaky)
+    workspace.status["M2"] = "held"
+    reason = "Checked the dataset myself; the client accepted it by phone."
+    r = _invoice(client, "M2", override_hold=True, override_reason=reason)
+    assert r.status_code == 502 and workspace.ledger == [] and "M2" not in workspace.invoices
+    assert "Draft 0041 stays in PayPal, unsent." in workspace.log[-1]["text"]
+    r = _invoice(client, "M2", override_hold=True, override_reason=reason)
+    assert r.status_code == 200
+    assert _events(workspace) == ["override", "drafted", "sent"]
+    assert {e["invoice"] for e in workspace.ledger} == {"0042"}
+
+
+def test_a_daily_cap_on_paypal_sends(workspace, fake_paypal, client, monkeypatch):
+    monkeypatch.setitem(server.DAILY_CAPS, "paypal", (1, "The demo has reached today's limit for PayPal sends. It resets tomorrow."))
+    server._daily.clear()
+    workspace.status["M1"] = "delivered"
+    assert _invoice(client).status_code == 200
+    r = client.post(f"{BASE}/milestones/M1/reminder", json={"approve": True})
+    assert r.status_code == 429 and "PayPal sends" in r.json()["detail"]
+    server._daily.clear()

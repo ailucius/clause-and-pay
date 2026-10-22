@@ -21,7 +21,7 @@ HANDOVER = (EVIDENCE / "m2-dataset-handover.docx").read_bytes()
 
 def _docx(body_xml: str, extra: dict | None = None) -> bytes:
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", "<Types/>")
         z.writestr("word/document.xml", '<w:document xmlns:w="w"><w:body>' + body_xml + "</w:body></w:document>")
         for name, data in (extra or {}).items():
@@ -42,7 +42,7 @@ def test_the_three_sample_files_load_as_their_kinds():
     assert img.kind == "png" and not img.text_checked and img.pages == [] and img.mime == "image/png"
     doc = load_evidence(HANDOVER, "handover.docx")
     assert doc.kind == "docx" and doc.text_checked and "980 completed survey responses" in doc.pages[0]
-    assert "route_id\tB12" in doc.pages[0]  # a table row reads as one line
+    assert "route_id B12" in doc.pages[0]  # a table row reads as one line
 
 
 @pytest.mark.parametrize("data", [
@@ -200,14 +200,27 @@ def test_met_without_a_quote_and_missing_items_do_not_count(schedule, monkeypatc
     assert out.recommendation == "hold"
 
 
-def test_an_image_is_sent_to_the_model_and_its_quotes_are_marked_not_text_checked(schedule, monkeypatch):
+def test_an_image_is_read_by_the_model_but_never_counts_as_met_by_itself(schedule, monkeypatch):
     fake, seen = _fake_model([_item(i, "met", "The deliverable is accepted in writing under clause 4.2") for i in range(1, 5)])
     monkeypatch.setattr(evidence, "generate_json", fake)
     out = asyncio.run(evidence.check_evidence(schedule, schedule.milestones[0], load_evidence(CERT, "cert.png")))
     assert seen["attachments"] == [(CERT, "image/png")] and "attached" in seen["prompt"]
-    assert out.recommendation == "send"
-    assert {c.quote_status for c in out.criteria} == {"not_text_checked"}
+    # nothing read from an image can be checked by code: every "met" is to be confirmed by eye
+    assert out.recommendation == "hold"
+    assert {c.verdict for c in out.criteria} == {"unchecked"} and {c.quote_status for c in out.criteria} == {"not_text_checked"}
+    assert "Confirm by eye" in out.criteria[0].reason and "confirm each item by eye" in out.summary.lower()
     assert out.file.text_checked is False and out.file.label == "PNG image"
+
+
+def test_a_scan_is_treated_like_an_image(schedule, monkeypatch):
+    import pymupdf
+    doc = pymupdf.open()
+    doc.new_page()
+    fake, seen = _fake_model([_item(i, "met", "Accepted in writing.") for i in range(1, 5)])
+    monkeypatch.setattr(evidence, "generate_json", fake)
+    out = asyncio.run(evidence.check_evidence(schedule, schedule.milestones[0], load_evidence(doc.tobytes(), "scan.pdf")))
+    assert seen["attachments"][0][1] == "application/pdf"
+    assert out.recommendation == "hold" and {c.verdict for c in out.criteria} == {"unchecked"}
 
 
 def test_a_word_file_is_checked_against_its_text_without_pages(schedule, monkeypatch):
@@ -222,15 +235,19 @@ def test_a_word_file_is_checked_against_its_text_without_pages(schedule, monkeyp
     assert "=== PAGE" not in seen["prompt"] and "980 completed" in seen["prompt"]
 
 
-def test_no_criteria_means_hold_without_asking_the_model(schedule, monkeypatch):
+@pytest.mark.parametrize("with_condition", [False, True])
+def test_no_criteria_means_hold_without_asking_the_model(schedule, monkeypatch, with_condition):
+    """Even with an invoicing condition to check, no acceptance criteria means there is
+    nothing to check the delivery against: the user decides."""
     async def boom(*a, **k):
         raise AssertionError("the model must not be called")
 
     monkeypatch.setattr(evidence, "generate_json", boom)
     m = schedule.milestones[0].model_copy(update={"acceptance_criteria": [], "acceptance_cite": None})
-    s = schedule.model_copy(update={"invoice_condition": None})
+    s = schedule if with_condition else schedule.model_copy(update={"invoice_condition": None})
+    assert (s.invoice_condition is not None) == with_condition
     out = asyncio.run(evidence.check_evidence(s, m, load_evidence(EMAIL, "e.pdf")))
-    assert out.recommendation == "hold" and out.criteria == []
+    assert out.recommendation == "hold" and out.criteria == [] and "nothing to check" in out.summary
 
 
 # ---- the endpoint ----
@@ -307,3 +324,96 @@ def test_sample_evidence_is_served_by_name_only():
     assert client.get("/api/sample-evidence/m2-dataset-handover.docx").headers["content-type"] == evidence.DOCX_MIME
     for bad in ("make_sample_evidence.py", "..%2Fnorthwind-harbour-services-agreement.pdf", "nope.pdf"):
         assert client.get(f"/api/sample-evidence/{bad}").status_code == 404
+
+
+# ---- review fixes: bounded work before the AI allowance is spent ----
+
+def _timed_load(data, name="x.docx"):
+    import time
+    t0 = time.perf_counter()
+    try:
+        ev = load_evidence(data, name)
+    except EvidenceError as e:
+        ev = e
+    return ev, time.perf_counter() - t0
+
+
+@pytest.mark.parametrize("body", [
+    '<w:p><w:r><w:t xml:space="preserve">a' + " " * 6_000_000 + 'b</w:t></w:r></w:p>',  # MBs of preserved spaces
+    '<w:p><w:r><w:t xml:space="preserve">a' + " \t" * 3_000_000 + '</w:t></w:r></w:p>',  # spaces and tabs
+    '<w:p><w:r><w:t xml:space="preserve">a-' + "\u00a0" * 2_000_000 + '\n-</w:t></w:r></w:p>',  # other blanks
+    "<w:t " * 1_300_000,  # tags that never close
+    "<w:br" * 1_300_000,
+], ids=["spaces", "spaces-and-tabs", "other-blanks", "open-text-tags", "open-break-tags"])
+def test_a_small_docx_with_megabytes_of_blanks_is_read_in_well_under_a_second(body):
+    data = _docx(body)
+    assert len(data) < 40_000  # a few KB on the wire, megabytes once unzipped
+    ev, seconds = _timed_load(data)
+    assert seconds < 0.5, seconds
+    if not isinstance(ev, EvidenceError):
+        assert len(ev.pages[0]) <= evidence.MAX_TEXT_CHARS
+
+
+def test_long_text_is_capped_before_quotes_are_checked():
+    import pymupdf
+    doc = pymupdf.open()
+    for _ in range(25):
+        page = doc.new_page()
+        page.insert_textbox(page.rect, ("Delivered and accepted. " * 400), fontsize=4)
+    ev = load_evidence(doc.tobytes(), "long.pdf")
+    assert ev.text_checked and sum(len(p) for p in ev.pages) <= evidence.MAX_TEXT_CHARS
+    big = evidence.tidy_text("word " * 200_000)
+    assert len(big) == evidence.MAX_TEXT_CHARS
+
+
+def test_uploads_count_against_a_per_visitor_limit_before_parsing(workspace, ai_on, monkeypatch):
+    monkeypatch.setitem(server.LIMITS, "upload", (3, 3600))
+    client = TestClient(server.app)
+    codes = [_upload(client, "M1", b"<html>junk</html>").status_code for _ in range(4)]
+    assert codes == [415, 415, 415, 429]
+
+
+def test_the_file_is_opened_off_the_event_loop(workspace, ai_on, monkeypatch):
+    import threading
+    seen = {}
+    real = evidence.load_evidence
+
+    def spy(data, name):
+        seen["thread"] = threading.current_thread() is threading.main_thread()
+        return real(data, name)
+
+    monkeypatch.setattr(evidence, "load_evidence", spy)
+    fake, _ = _fake_model(GOOD)
+    monkeypatch.setattr(evidence, "generate_json", fake)
+    assert _upload(TestClient(server.app), "M1", EMAIL).status_code == 200
+    assert seen["thread"] is False
+
+
+@pytest.mark.parametrize("path", ["evidence", "deliver"])
+def test_an_invoice_sent_while_the_check_ran_is_not_undone(workspace, ai_on, monkeypatch, path):
+    """Two tabs: one checks evidence, the other sends the invoice meanwhile."""
+    from app import agent
+
+    async def check_while_invoiced(*a, **k):
+        workspace.invoices["M1"] = {"id": "INV2-X", "number": "0041", "status": "SENT"}
+        workspace.status["M1"] = "invoiced"
+        if path == "evidence":
+            return evidence.EvidenceCheck(file=evidence.file_info(load_evidence(EMAIL, "e.pdf")),
+                                          recommendation="hold", criteria=[], summary="")
+        return agent.DeliveryCheck(recommendation="hold", criteria=[], summary="")
+
+    monkeypatch.setattr(evidence, "check_evidence", check_while_invoiced)
+    monkeypatch.setattr(agent, "check_delivery", check_while_invoiced)
+    client = TestClient(server.app)
+    if path == "evidence":
+        r = _upload(client, "M1", EMAIL)
+    else:
+        r = client.post("/api/contracts/abcdef123456/milestones/M1/deliver", json={"evidence": "done"})
+    assert r.status_code == 409
+    assert workspace.status["M1"] == "invoiced" and "M1" not in workspace.checks
+
+
+def test_the_page_says_the_check_is_advice():
+    from pathlib import Path
+    js = (Path(server.ROOT) / "static" / "app.js").read_text()
+    assert "advice" in js.lower() and "Confirm by eye" in js
