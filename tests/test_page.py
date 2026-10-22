@@ -40,3 +40,35 @@ def test_the_sample_evidence_files_exist() -> None:
     folder = Path(server.SAMPLE_EVIDENCE)
     names = {p.name for p in folder.iterdir()}
     assert {"m1-acceptance-email.pdf", "m1-acceptance-certificate.png", "m2-dataset-handover.docx"} <= names
+
+
+def _static(name: str) -> str:
+    from pathlib import Path
+    return (Path(server.ROOT) / "static" / name).read_text()
+
+
+def test_ledger_text_wraps_between_words() -> None:
+    """Source and Detail are never narrower than their longest words, and grid cells
+    wrap at word boundaries (no break-anywhere)."""
+    import re
+    js, css = _static("app.js"), _static("style.css")
+    longest = max(len("(record_payment_for_invoice)"), len("accounts@harbourcity.example.com"))
+    for field in ("source", "detail"):
+        col = re.search(r'\{ field: "%s", headerName: "\w+", flex: [\d.]+, minWidth: (\d+), wrapText: true, autoHeight: true \}' % field, js)
+        assert col, field
+        assert int(col.group(1)) >= longest * 7.6  # about 7.5 px a character at the grid's 13.5 px
+    rule = re.search(r"\.aggrid \.ag-cell-wrap-text \{([^}]*)\}", css).group(1)
+    assert "word-break: normal" in rule and "anywhere" not in rule
+
+
+def test_opening_a_ledger_tab_scrolls_it_into_view_and_respects_reduced_motion() -> None:
+    js = _static("app.js")
+    assert 'prefers-reduced-motion: reduce' in js and 'reducedMotion() ? "auto" : "smooth"' in js
+    assert 'showBooks("led"); revealBooks();' in js and 'showBooks("inv"); revealBooks();' in js
+
+
+def test_a_mouse_click_draws_no_cell_focus_box_but_the_keyboard_keeps_it() -> None:
+    js, css = _static("app.js"), _static("style.css")
+    assert 'addEventListener("pointerdown", () => host.classList.add("pointer-focus"), true)' in js
+    assert 'addEventListener("keydown", () => host.classList.remove("pointer-focus"), true)' in js
+    assert ".aggrid.pointer-focus .ag-cell-focus:not(.ag-cell-range-selected):focus-within { border-color: transparent; }" in css

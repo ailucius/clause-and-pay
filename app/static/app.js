@@ -215,14 +215,18 @@ function ledColumns() {
     // Newest first; events recorded in the same second keep the order they happened in.
     { field: "at", headerName: "When", width: 128, minWidth: 124, sort: "desc", valueFormatter: (p) => dateTime(p.value),
       comparator: (a, b, na, nb) => (a < b ? -1 : a > b ? 1 : na.data.n - nb.data.n) },
-    { field: "event", headerName: "Event", width: 214, minWidth: 206, valueFormatter: (p) => EVENT_WORDS[p.value] || p.value,
+    { field: "event", headerName: "Event", width: 206, minWidth: 200, valueFormatter: (p) => EVENT_WORDS[p.value] || p.value,
       cellRenderer: (p) => pill(EVENT_WORDS[p.value] || p.value, EVENT_CLS[p.value] || "muted") },
-    { field: "milestone", headerName: "Milestone", width: 160, minWidth: 130, wrapText: true, autoHeight: true },
-    { field: "invoice", headerName: "Invoice", width: 92, minWidth: 86 },
+    // The invoice with its milestone code; the milestone's name is in the CSV and on hover.
+    { field: "invoice", headerName: "Invoice", width: 104, minWidth: 100, tooltipField: "milestone",
+      valueFormatter: (p) => (p.value ? `${p.value} · ${p.data.code}` : p.data.code) },
     moneyCol("amountNum"),
     { field: "currency", headerName: "Currency", hide: true }, // in the CSV, next to the plain amount
-    { field: "source", headerName: "Source", width: 230, minWidth: 190, wrapText: true, autoHeight: true },
-    { field: "detail", headerName: "Detail", width: 280, minWidth: 220, wrapText: true, autoHeight: true },
+    { field: "milestone", headerName: "Milestone", hide: true },
+    // Source and Detail share the rest of the width and never go narrower than their
+    // longest words (a tool name, an email address), so text wraps between words.
+    { field: "source", headerName: "Source", flex: 1, minWidth: 250, wrapText: true, autoHeight: true },
+    { field: "detail", headerName: "Detail", flex: 1.2, minWidth: 270, wrapText: true, autoHeight: true },
   ];
 }
 
@@ -232,6 +236,10 @@ const NO_ROWS = {
 };
 
 function makeGrid(host, opts) {
+  // A click focuses a cell too, and AG Grid outlines the focused cell. Keep that outline for
+  // keyboard users and drop it after a mouse or touch click: the class says how focus came.
+  host.addEventListener("pointerdown", () => host.classList.add("pointer-focus"), true);
+  host.addEventListener("keydown", () => host.classList.remove("pointer-focus"), true);
   return AG.createGrid(host, {
     theme: gridTheme(), domLayout: "autoHeight", animateRows: true, enableCellTextSelection: true,
     suppressDragLeaveHidesColumns: true, suppressMovableColumns: true,
@@ -265,6 +273,7 @@ function ensureGrids() {
   });
   GRIDS.led = makeGrid($("#ledgrid"), {
     columnDefs: ledColumns(), rowData: ledgerRows(), getRowId: (p) => String(p.data.n),
+    onGridSizeChanged: () => {}, // flex columns fill the width; fitting would squeeze them below their words
     overlayNoRowsTemplate: `<span class="g-empty">${NO_ROWS.led}</span>`,
   });
 }
@@ -329,6 +338,25 @@ function renderBooks() {
   }
 }
 
+const reducedMotion = () => window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+// Bring the invoices and ledger card to the top of the screen when the table is not fully
+// on screen. The grid on a newly shown tab sizes its rows over a few frames, so this waits
+// until the card's height has held still for three frames (at most about 40 frames).
+function revealBooks() {
+  const card = $("#books");
+  let last = -1, still = 0, frames = 0;
+  const step = () => {
+    const h = card.offsetHeight;
+    still = h === last ? still + 1 : 0;
+    last = h;
+    if (still < 3 && ++frames < 40) { requestAnimationFrame(step); return; }
+    const r = card.getBoundingClientRect();
+    if (r.top >= 0 && r.bottom <= window.innerHeight) return;
+    card.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" });
+  };
+  requestAnimationFrame(step);
+}
+
 function showBooks(tab) {
   BOOKS_TAB = tab;
   for (const t of ["inv", "led"]) {
@@ -350,7 +378,7 @@ function ledgerCsvParams() {
     processCellCallback: (p) => {
       const field = p.column.getColDef().field;
       if (field === "amountNum") return p.value === null || p.value === undefined ? "" : Number(p.value).toFixed(2);
-      if (field === "at") return p.value;
+      if (field === "at" || field === "invoice") return p.value ?? "";
       const v = typeof p.formatValue === "function" ? p.formatValue(p.value) : p.value;
       const s = v === null || v === undefined ? "" : String(v);
       return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
@@ -573,7 +601,7 @@ function renderPanel() {
       inv.override_reason ? el("p", { class: "hint" }, `Sent over the agent's hold. Your reason: ${inv.override_reason}`) : null,
       el("div", { class: "row links" },
         link && el("a", { class: "link", href: link, target: "_blank", rel: "noopener" }, "Open the invoice in PayPal"),
-        el("a", { class: "link", href: "#books", onclick: (e) => { e.preventDefault(); showBooks("led"); $("#books").scrollIntoView({ behavior: "smooth" }); } },
+        el("a", { class: "link", href: "#books", onclick: (e) => { e.preventDefault(); showBooks("led"); revealBooks(); } },
           "See every event in the ledger"))),
       isPaid(inv.status) ? null : el("div", { class: "row" }, refresh, OPEN_STATES.includes(inv.status) ? el("button", { class: "btn", onclick: async (ev) => {
         err.textContent = ""; ev.currentTarget.disabled = true; ev.currentTarget.textContent = "Recording in the PayPal sandbox...";
@@ -725,8 +753,8 @@ $("#file").addEventListener("change", (ev) => {
   const fd = new FormData(); fd.append("file", f);
   start(api("/api/contracts", { method: "POST", body: fd }), f.name);
 });
-$("#tab-inv").addEventListener("click", () => showBooks("inv"));
-$("#tab-led").addEventListener("click", () => showBooks("led"));
+$("#tab-inv").addEventListener("click", () => { showBooks("inv"); revealBooks(); });
+$("#tab-led").addEventListener("click", () => { showBooks("led"); revealBooks(); });
 $("#books [role=tablist]").addEventListener("keydown", (e) => {
   if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
   const next = BOOKS_TAB === "inv" ? "led" : "inv"; showBooks(next); $(`#tab-${next}`).focus();

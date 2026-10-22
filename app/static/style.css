@@ -140,7 +140,10 @@ label.f { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px;
 .aggrid { width: 100%; }
 /* Cells read from the top, so a row with a wrapped cell stays aligned. */
 .aggrid .ag-cell { display: flex; align-items: flex-start; line-height: 1.45; padding-top: 9px; padding-bottom: 9px; }
-.aggrid .ag-cell-wrap-text { word-break: normal; overflow-wrap: anywhere; }
+/* Wrap between words; a single word wider than its column (none at the minimum widths) may still break. */
+.aggrid .ag-cell-wrap-text { word-break: normal; overflow-wrap: break-word; hyphens: none; }
+/* After a mouse or touch click the focused cell has no box; keyboard focus keeps AG Grid's. */
+.aggrid.pointer-focus .ag-cell-focus:not(.ag-cell-range-selected):focus-within { border-color: transparent; }
 .aggrid .ag-right-aligned-cell { justify-content: flex-end; }
 /* No 150 px blank area under a short table; an empty one keeps room for its message. */
 .aggrid * { --ag-auto-height-min-body-height: 0px !important; }
