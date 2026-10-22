@@ -14,12 +14,14 @@ from typing import Optional
 import time
 from collections import defaultdict, deque
 
+import httpx
+
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, billing_agent
+from . import agent, billing_agent, evidence
 from .contract_reader import read_contract
 from .llm import ai_configured, model_id
 from .paypal_client import PayPalClient, PayPalError, paypal_configured
@@ -27,8 +29,13 @@ from .schedule import Schedule
 
 ROOT = Path(__file__).resolve().parent
 SAMPLE = ROOT.parent / "samples" / "northwind-harbour-services-agreement.pdf"
+SAMPLE_EVIDENCE = ROOT.parent / "samples" / "evidence"
 MAX_UPLOAD = 15 * 1024 * 1024
+AGENT_TIMEOUT = float(os.environ.get("AGENT_TIMEOUT_SECONDS", "120"))
+CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT_SECONDS", "90"))
+MIN_OVERRIDE_REASON = 10
 
+log = logging.getLogger("clausepay")
 app = FastAPI(title="Clause & Pay")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
@@ -42,9 +49,33 @@ class Workspace(BaseModel):
     invoices: dict[str, dict] = {}  # milestone code -> {id, number, status, due_date, link}
     proposals: dict[str, dict] = {}  # billing agent actions waiting for the user's approval
     log: list[dict] = []
+    ledger: list[dict] = []  # every invoice event: drafted, sent, reminded, paid... with amounts and dates
 
     def note(self, text: str, kind: str = "info") -> None:
-        self.log.append({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "kind": kind, "text": text})
+        self.log.append({"at": _now(), "kind": kind, "text": text})
+
+    def record(self, event: str, code: str, *, source: str, rec: Optional[dict] = None,
+               amount: Optional[str] = None, detail: str = "") -> dict:
+        """Add one invoice event to the ledger. `rec` is the milestone's invoice record."""
+        rec = rec or self.invoices.get(code) or {}
+        entry = {"at": _now(), "event": event, "code": code, "invoice": rec.get("number"),
+                 "invoice_id": rec.get("id"), "amount": amount if amount is not None else rec.get("amount"),
+                 "currency": rec.get("currency"), "source": source, "detail": detail}
+        self.ledger.append(entry)
+        return entry
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _long(iso: str) -> str:
+    """2026-11-21 -> 21 November 2026 (as written on the page)."""
+    try:
+        d = date.fromisoformat(iso[:10])
+    except ValueError:
+        return iso
+    return f"{d.day} {d:%B %Y}"
 
 
 STORE: dict[str, Workspace] = {}
@@ -201,23 +232,98 @@ class Delivery(BaseModel):
     evidence: str = ""
 
 
+def not_invoiced(w: Workspace, code: str) -> None:
+    if code in w.invoices:
+        raise HTTPException(409, f"{code} already has invoice {w.invoices[code]['number']}; its delivery is settled.")
+
+
+async def _timed(coro, seconds: float, message: str):
+    """Await a model call, or answer 504 with a plain message when it takes too long."""
+    try:
+        return await asyncio.wait_for(coro, timeout=seconds)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, message)
+
+
 @app.post("/api/contracts/{cid}/milestones/{code}/deliver")
 async def deliver(cid: str, code: str, body: Delivery, request: Request):
     w = ws(cid)
     m = milestone(w, code)
+    not_invoiced(w, code)
     spend(request, "ai")
-    check = await agent.check_delivery(w.schedule, m, body.evidence)
-    w.checks[code] = check.model_dump()
+    check = await _timed(agent.check_delivery(w.schedule, m, body.evidence), CHECK_TIMEOUT,
+                         "The delivery check took too long. Try again.")
+    w.checks[code] = {**check.model_dump(), "kind": "note"}
     w.status[code] = "delivered" if check.recommendation == "send" else "held"
     w.note(f"{code} marked delivered. Agent recommends {check.recommendation.upper()}: {check.summary}",
            "ok" if check.recommendation == "send" else "warn")
     return w.model_dump()
 
 
+@app.post("/api/contracts/{cid}/milestones/{code}/evidence")
+async def deliver_file(cid: str, code: str, request: Request):
+    """Delivery proof as a file (PDF, PNG, JPEG or .docx): Gemini checks it against the
+    milestone's quoted acceptance criteria, item by item, quoting the file's own words.
+    The file is read and dropped; it is never stored, served back or rendered."""
+    w = ws(cid)
+    m = milestone(w, code)
+    not_invoiced(w, code)
+    # Refuse an oversized upload from its header, before the body is parsed.
+    try:
+        length = int(request.headers.get("content-length", ""))
+    except ValueError:
+        raise HTTPException(411, "Send the file with its length.")
+    if length > evidence.MAX_EVIDENCE_BYTES + 64 * 1024:
+        raise HTTPException(413, f"The evidence file is larger than {evidence.MAX_EVIDENCE_BYTES // (1024 * 1024)} MB.")
+    try:
+        form = await request.form(max_files=1, max_fields=1)
+    except Exception:
+        raise HTTPException(400, "Send one evidence file.")
+    up = form.get("file")
+    if up is None or isinstance(up, str):
+        raise HTTPException(400, "Send one evidence file.")
+    data = await up.read(evidence.MAX_EVIDENCE_BYTES + 1)
+    try:
+        ev = evidence.load_evidence(data, up.filename)
+    except evidence.EvidenceError as e:
+        raise HTTPException(e.status, e.message)
+    finally:
+        await form.close()
+    if not ai_configured():
+        raise HTTPException(409, "The AI model is not configured on this server.")
+    spend(request, "ai")
+    try:
+        check = await _timed(evidence.check_evidence(w.schedule, m, ev), CHECK_TIMEOUT,
+                             "The evidence check took too long. Try again, or try a smaller file.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("evidence check failed for %s: %s", code, str(e)[:200])
+        raise HTTPException(502, "The model could not read that file just now. Try again, or try a PDF.")
+    w.checks[code] = check.model_dump()
+    w.status[code] = "delivered" if check.recommendation == "send" else "held"
+    met = sum(1 for c in check.criteria if c.verdict == "met")
+    w.note(f"{code}: evidence file {ev.name} checked, {met} of {len(check.criteria)} items met. "
+           f"Agent recommends {check.recommendation.upper()}.", "ok" if check.recommendation == "send" else "warn")
+    return w.model_dump()
+
+
+@app.get("/api/sample-evidence/{name}")
+async def sample_evidence(name: str):
+    """The fictional evidence files in samples/evidence, for trying the check."""
+    files = {p.name: p for p in SAMPLE_EVIDENCE.glob("*") if p.suffix in (".pdf", ".png", ".docx")}
+    p = files.get(name)
+    if not p:
+        raise HTTPException(404, "No such sample.")
+    media = {".pdf": "application/pdf", ".png": "image/png", ".docx": evidence.DOCX_MIME}[p.suffix]
+    return FileResponse(p, media_type=media, filename=p.name)
+
+
 class InvoiceRequest(BaseModel):
     recipient_email: str
     approve: bool = False
     override_hold: bool = False
+    override_reason: str = ""
 
 
 @app.post("/api/contracts/{cid}/milestones/{code}/invoice")
@@ -228,30 +334,64 @@ async def invoice(cid: str, code: str, body: InvoiceRequest, request: Request):
         raise HTTPException(400, "Sending an invoice needs your approval.")
     if code in w.invoices:
         raise HTTPException(409, f"{code} already has invoice {w.invoices[code]['number']}.")
-    if w.status.get(code) == "held" and not body.override_hold:
+    state = w.status.get(code)
+    if state not in ("delivered", "held"):
+        raise HTTPException(409, "Check the delivery against the contract before invoicing.")
+    reason = " ".join(body.override_reason.split())[:500]
+    overridden = state == "held"
+    if overridden and not body.override_hold:
         raise HTTPException(409, "The agent recommended holding this invoice. Confirm the override to send it anyway.")
+    if overridden and len(reason) < MIN_OVERRIDE_REASON:
+        raise HTTPException(422, "Say why you are sending it over the hold; the reason goes in the ledger.")
+    if not m.amount:
+        raise HTTPException(422, f"{code} has no readable amount; it cannot be invoiced.")
     pp = paypal()
     spend(request, "paypal")
+    amount, rec = str(Decimal(m.amount).quantize(Decimal("0.01"))), None
     try:
         number = await pp.next_invoice_number()
+        if overridden:  # the decision comes first in the ledger, with its reason
+            w.record("override", code, rec={"number": number, "amount": amount, "currency": m.currency},
+                     source="You", detail=f"Invoiced over the agent's hold. Reason: {reason}")
         payload = agent.invoice_payload(w.schedule, m, invoice_number=number,
                                         recipient_email=body.recipient_email, invoice_date=date.today(),
                                         invoicer_email=os.environ.get("PAYPAL_INVOICER_EMAIL") or None)
         inv = await pp.create_draft(payload)
+        rec = {"id": inv["id"], "number": number, "status": inv.get("status"), "amount": amount,
+               "currency": m.currency, "invoice_date": payload["detail"]["invoice_date"],
+               "recipient": body.recipient_email, "reminders": 0}
+        w.record("drafted", code, rec=rec, source="App: PayPal Invoicing API (create draft)",
+                 detail=f"Draft {number} created for {body.recipient_email}.")
         subject = f"{w.schedule.contract_reference or w.schedule.contract_title}: invoice for {m.code}"
         await pp.send(inv["id"], subject=subject)
         inv = await pp.get(inv["id"])
     except PayPalError as e:
         w.note(f"PayPal refused the invoice for {code}: {e.message}", "error")
         raise HTTPException(502, f"PayPal: {e.message}")
-    link = recipient_link(inv)
-    due = (inv.get("detail", {}).get("payment_term", {}) or {}).get("due_date")
-    w.invoices[code] = {"id": inv["id"], "number": number, "status": inv.get("status"), "due_date": due, "link": link}
-    overridden = w.status.get(code) == "held"
+    except httpx.HTTPError:
+        w.note(f"PayPal could not be reached while invoicing {code}.", "error")
+        raise HTTPException(502, "PayPal could not be reached. Try again.")
+    rec.update(status=inv.get("status"), link=recipient_link(inv), sent_at=_now(),
+               due_date=(inv.get("detail", {}).get("payment_term", {}) or {}).get("due_date"))
+    if overridden:
+        rec["override_reason"] = reason
+    w.invoices[code] = rec
+    w.record("sent", code, source="App: PayPal Invoicing API (send)",
+             detail=f"Sent to {body.recipient_email}" + (f", due {_long(rec['due_date'])}." if rec.get("due_date") else "."))
     w.status[code] = "invoiced"
     w.note(f"Invoice {number} for {code} sent through PayPal ({m.currency} {Decimal(m.amount):,.2f})"
-           + (", over the agent's hold." if overridden else "."), "warn" if overridden else "ok")
+           + (f", over the agent's hold. Reason: {reason}" if overridden else "."), "warn" if overridden else "ok")
     return w.model_dump()
+
+
+def mark_paid(w: Workspace, code: str, rec: dict, *, source: str, amount: Optional[str] = None, detail: str = "") -> bool:
+    """Mark a milestone paid once; the ledger gets one paid event however the news arrives."""
+    if w.status.get(code) == "paid":
+        return False
+    w.status[code] = "paid"
+    rec["paid_at"] = _now()
+    w.record("paid", code, rec=rec, source=source, amount=amount, detail=detail)
+    return True
 
 
 @app.post("/api/contracts/{cid}/milestones/{code}/refresh")
@@ -268,9 +408,12 @@ async def refresh(cid: str, code: str):
     rec["link"] = rec.get("link") or recipient_link(inv)
     rec["due_date"] = (inv.get("detail", {}).get("payment_term", {}) or {}).get("due_date") or rec.get("due_date")
     if rec["status"] in ("PAID", "MARKED_AS_PAID"):
-        if w.status.get(code) != "paid":
+        paid = ((inv.get("payments") or {}).get("paid_amount") or {}).get("value")
+        if mark_paid(w, code, rec, source="App: PayPal invoice status (Check payment status)", amount=paid,
+                     detail=f"PayPal status {rec['status']}."):
             w.note(f"PayPal reports invoice {rec['number']} paid. {code} marked paid.", "ok")
-        w.status[code] = "paid"
+    elif rec["status"] == "CANCELLED" and not any(e["event"] == "cancelled" and e["code"] == code for e in w.ledger):
+        w.record("cancelled", code, rec=rec, source="App: PayPal invoice status (Check payment status)")
     return w.model_dump()
 
 
@@ -297,20 +440,33 @@ async def reminder(cid: str, code: str, body: ReminderRequest, request: Request)
         await paypal().remind(rec["id"], subject=subject, note=note)
     except PayPalError as e:
         raise HTTPException(502, f"PayPal: {e.message}")
+    rec["reminders"] = rec.get("reminders", 0) + 1
+    rec["last_reminder_at"] = _now()
+    w.record("reminded", code, rec=rec, source="App: PayPal Invoicing API (remind), approved by you",
+             amount=rec.get("amount"), detail=subject)
     w.note(f"Reminder sent for invoice {rec['number']} ({code}).", "ok")
     return {"subject": subject, "note": note, "sent": True, "workspace": w.model_dump()}
 
 
 # ---- PayPal webhook: invoices paid on PayPal mark their milestone paid ----
-log = logging.getLogger("clausepay")
 PAID_STATES = ("PAID", "MARKED_AS_PAID")
 _seen_events: deque = deque(maxlen=500)
 
 
 def _event_invoice(event: dict) -> tuple[Optional[str], Optional[str]]:
-    res = event.get("resource") or {}
-    inv = res.get("invoice") if isinstance(res.get("invoice"), dict) else res
+    inv = _event_resource(event)
     return inv.get("id"), inv.get("status")
+
+
+def _event_resource(event: dict) -> dict:
+    res = event.get("resource") or {}
+    return res.get("invoice") if isinstance(res.get("invoice"), dict) else res
+
+
+def _event_paid_amount(event: dict) -> Optional[str]:
+    inv = _event_resource(event)
+    return (((inv.get("payments") or {}).get("paid_amount") or {}).get("value")
+            or (inv.get("amount") or {}).get("value"))
 
 
 def apply_invoice_event(event: dict) -> Optional[str]:
@@ -327,12 +483,14 @@ def apply_invoice_event(event: dict) -> Optional[str]:
                 continue
             if paid:
                 rec["status"] = status if status in PAID_STATES else "PAID"
-                if w.status.get(code) != "paid":
-                    w.status[code] = "paid"
+                if mark_paid(w, code, rec, source=f"PayPal webhook {etype} (signature verified)",
+                             amount=_event_paid_amount(event), detail=f"Event {event.get('id')}"):
                     w.note(f"PayPal webhook {etype} (signature verified): invoice {rec['number']} paid. {code} marked paid.", "ok")
             elif etype == "INVOICING.INVOICE.CANCELLED":
                 if rec.get("status") != "CANCELLED":
                     rec["status"] = "CANCELLED"
+                    w.record("cancelled", code, rec=rec, source=f"PayPal webhook {etype} (signature verified)",
+                             detail=f"Event {event.get('id')}")
                     w.note(f"Invoice {rec['number']} for {code} was cancelled in PayPal.", "warn")
             elif status:
                 rec["status"] = status
@@ -382,7 +540,11 @@ async def ask_agent(cid: str, body: Question, request: Request):
     spend(request, "ai")
     ctx = billing_agent.contract_context(w.schedule, w.invoices, w.status, date.today())
     try:
-        out = await billing_agent.ask(q, ctx, allowed={i["id"] for i in w.invoices.values()})
+        out = await asyncio.wait_for(billing_agent.ask(q, ctx, allowed={i["id"] for i in w.invoices.values()}),
+                                     timeout=AGENT_TIMEOUT)
+    except asyncio.TimeoutError:
+        w.note("The billing agent took too long to answer.", "error")
+        raise HTTPException(504, "The billing agent took too long. Try a narrower question.")
     except Exception as e:
         w.note(f"The billing agent could not answer: {str(e)[:160]}", "error")
         raise HTTPException(502, "The billing agent could not answer just now. Try again.")
@@ -411,6 +573,14 @@ async def approve_proposal(cid: str, pid: str, request: Request):
         w.note(f"PayPal refused the agent's {prop['method']}: {str(e)[:160]}", "error")
         raise HTTPException(502, "PayPal refused that action.")
     w.proposals.pop(pid, None)
+    iid = prop["args"].get("invoice_id")
+    code = next((c for c, i in w.invoices.items() if i["id"] == iid), None)
+    if code:
+        rec = w.invoices[code]
+        rec["reminders"] = rec.get("reminders", 0) + 1
+        rec["last_reminder_at"] = _now()
+        w.record("reminded", code, rec=rec, source="Billing agent proposal, approved by you; sent with the PayPal Agent Toolkit (send_invoice_reminder)",
+                 detail=str(prop["args"].get("subject") or "")[:200])
     w.note(f"Approved and sent through the PayPal Agent Toolkit: {prop['summary']}.", "ok")
     return w.model_dump()
 
@@ -445,6 +615,9 @@ async def sandbox_payment(cid: str, code: str, request: Request):
     except Exception as e:
         w.note(f"PayPal refused the sandbox payment for {code}: {str(e)[:160]}", "error")
         raise HTTPException(502, "PayPal refused the sandbox payment.")
+    w.record("payment_recorded", code, rec=rec, amount=m.amount,
+             source="Sandbox demo: PayPal Agent Toolkit (record_payment_for_invoice)",
+             detail="The client's bank transfer, logged in the PayPal sandbox. PayPal confirms it next.")
     w.note(f"Sandbox: the client's payment for invoice {rec['number']} recorded in PayPal. Waiting for PayPal to confirm it.")
     return w.model_dump()
 

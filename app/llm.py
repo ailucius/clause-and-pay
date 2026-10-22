@@ -45,11 +45,16 @@ def _get_client():
     return _client
 
 
-async def generate_json(prompt: str, schema: type[T], *, temperature: float = 0.1) -> T:
+async def generate_json(prompt: str, schema: type[T], *, temperature: float = 0.1,
+                        attachments: list[tuple[bytes, str]] | None = None) -> T:
+    """`attachments`: (bytes, mime type) pairs sent with the prompt, e.g. an image the model reads."""
     from google.genai import types
+    contents: object = prompt
+    if attachments:
+        contents = [types.Part.from_bytes(data=b, mime_type=mime) for b, mime in attachments] + [prompt]
     resp = await _get_client().aio.models.generate_content(
         model=model_id(),
-        contents=prompt,
+        contents=contents,
         config=types.GenerateContentConfig(
             temperature=temperature,
             response_mime_type="application/json",

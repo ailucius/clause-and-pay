@@ -58,6 +58,16 @@ def _decls() -> list[types.FunctionDeclaration]:
     return out
 
 
+def _thinking() -> Optional[types.ThinkingConfig]:
+    """How much the model thinks before each step: CLAUSEPAY_AGENT_THINKING = low, medium
+    or high; unset, the model's own default. (Measured 22 Oct 2026 on gemini-3.8-flash: a
+    question takes 15 to 70 s either way; most of it is the model's own latency per round.)"""
+    level = os.environ.get("CLAUSEPAY_AGENT_THINKING", "").strip().upper()
+    if level not in ("LOW", "MEDIUM", "HIGH"):  # "minimal" is refused by the model
+        return None
+    return types.ThinkingConfig(thinking_level=level)
+
+
 def paypal_api() -> PayPalAPI:
     return PayPalAPI(client_id=os.environ["PAYPAL_CLIENT_ID"], secret=os.environ["PAYPAL_CLIENT_SECRET"],
                      context=Context(sandbox=True, source="CLAUSE-AND-PAY"))
@@ -119,7 +129,8 @@ async def ask(question: str, context_text: str, api: Optional[PayPalAPI] = None,
     api = api or paypal_api()
     client = _get_client()
     cfg = types.GenerateContentConfig(system_instruction=SYSTEM + "\n" + context_text,
-                                      tools=[types.Tool(function_declarations=_decls())], temperature=0.2)
+                                      tools=[types.Tool(function_declarations=_decls())], temperature=0.2,
+                                      thinking_config=_thinking())
     contents: list[types.Content] = [types.Content(role="user", parts=[types.Part(text=question)])]
     trace: list[dict] = []
     proposals: list[dict] = []

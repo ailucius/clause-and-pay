@@ -7,5 +7,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir --no-deps paypal-agent-toolkit==1.11.0
 COPY app app
 COPY samples/northwind-harbour-services-agreement.pdf samples/
+COPY samples/evidence/ samples/evidence/
 ENV PORT=8080
 CMD ["sh", "-c", "uvicorn app.server:app --host 0.0.0.0 --port ${PORT}"]
