@@ -262,3 +262,18 @@ def test_demo_limits_refuse_after_the_hourly_allowance():
         server.spend(Req(spoofed="10.0.0.250"), "paypal")
     assert e.value.status_code == 429
     assert server.client_ip(Req()) == "203.0.113.9"
+
+
+def test_the_limit_key_can_be_logged_for_a_check(monkeypatch, caplog):
+    from app import server
+
+    class Req:
+        headers = {"x-forwarded-for": "198.51.100.7, 203.0.113.9"}
+        client = None
+
+    server._hits.clear()
+    monkeypatch.setattr(server, "LOG_CLIENT_ADDRESS", True)
+    with caplog.at_level("WARNING", logger="clausepay"):
+        server.spend(Req(), "upload")
+    assert "keyed by 203.0.113.9 (X-Forwarded-For has 2 entries)" in caplog.text
+    server._hits.clear()

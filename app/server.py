@@ -97,6 +97,8 @@ DAILY_CAPS = {
 # front end appends the address it saw as the last entry; everything before it is
 # whatever the client sent, so it is never trusted.
 TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "1"))
+# On to check which address the limits use against the platform's request log; off by default.
+LOG_CLIENT_ADDRESS = os.environ.get("LOG_CLIENT_ADDRESS", "").lower() in ("1", "true", "yes")
 _hits: dict[tuple[str, str], deque] = defaultdict(deque)
 _daily: dict[tuple[str, str], int] = defaultdict(int)
 
@@ -112,7 +114,11 @@ def spend(request: Request, kind: str) -> None:
     """Count one use of `kind` for this visitor, or refuse with 429."""
     limit, window = LIMITS[kind]
     now = time.time()
-    q = _hits[(client_ip(request), kind)]
+    ip = client_ip(request)
+    if LOG_CLIENT_ADDRESS:
+        entries = len([p for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()])
+        log.warning("demo limit for %s keyed by %s (X-Forwarded-For has %d entries)", kind, ip, entries)
+    q = _hits[(ip, kind)]
     while q and q[0] < now - window:
         q.popleft()
     if len(q) >= limit:

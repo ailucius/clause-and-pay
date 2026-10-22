@@ -89,7 +89,7 @@ The tests run offline, with Gemini and PayPal mocked: quote verification on the 
 
 `python scripts/live_read.py` reads the sample with the live model and prints counts only. `python scripts/live_evidence.py` checks the three sample evidence files against the sample contract with the live model and prints the verdicts.
 
-Optional settings: `AGENT_TIMEOUT_SECONDS` (120) and `CHECK_TIMEOUT_SECONDS` (90) bound a slow model call; `CLAUSEPAY_AGENT_THINKING` (low, medium or high) sets the billing agent's thinking level. Demo limits: `AI_CALLS_PER_HOUR_PER_IP` (20), `PAYPAL_SENDS_PER_HOUR_PER_IP` (15), `EVIDENCE_UPLOADS_PER_HOUR_PER_IP` (30), `AI_CALLS_PER_DAY` (300) and `PAYPAL_SENDS_PER_DAY` (200). The visitor's address is the last entry of `X-Forwarded-For` (the one Google's front end appends on Cloud Run; earlier entries come from the client); set `TRUSTED_PROXY_HOPS` if more proxies sit in front.
+Optional settings: `AGENT_TIMEOUT_SECONDS` (120) and `CHECK_TIMEOUT_SECONDS` (90) bound a slow model call; `CLAUSEPAY_AGENT_THINKING` (low, medium or high) sets the billing agent's thinking level. Demo limits: `AI_CALLS_PER_HOUR_PER_IP` (20), `PAYPAL_SENDS_PER_HOUR_PER_IP` (15), `EVIDENCE_UPLOADS_PER_HOUR_PER_IP` (30), `AI_CALLS_PER_DAY` (300) and `PAYPAL_SENDS_PER_DAY` (200). The visitor's address is the last entry of `X-Forwarded-For` (the one Google's front end appends on Cloud Run; earlier entries come from the client); set `TRUSTED_PROXY_HOPS` if more proxies sit in front (`LOG_CLIENT_ADDRESS=1` logs which address each limit uses, to compare with the platform's request log).
 
 ## Licence
 
