@@ -8,7 +8,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from .llm import generate_json
+from .llm import CHECK_ATTEMPT_SECONDS, CHECK_ATTEMPTS, generate_json
 from .schedule import Milestone, Schedule
 
 NET_TERMS = {10: "NET_10", 15: "NET_15", 30: "NET_30", 45: "NET_45", 60: "NET_60", 90: "NET_90"}
@@ -117,7 +117,8 @@ async def check_delivery(s: Schedule, m: Milestone, evidence: str) -> DeliveryCh
                             + (" (the last milestone)" if i == len(s.milestones) - 1 else "")
                             for i, x in enumerate(s.milestones)) or "- (not listed)",
         condition=cond, evidence=(evidence or "(no delivery note given)")[:6000])
-    out = await generate_json(prompt, DeliveryCheck)
+    out = await generate_json(prompt, DeliveryCheck, attempt_seconds=CHECK_ATTEMPT_SECONDS,
+                              attempts=CHECK_ATTEMPTS)
     rec = out.recommendation.strip().lower()
     if rec != "send" or any(c.met.strip().lower() != "yes" for c in out.criteria):
         out.recommendation = "hold"

@@ -2,6 +2,7 @@
 Vertex AI under the runtime's own identity when GOOGLE_GENAI_USE_VERTEXAI is set."""
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import TypeVar
 
@@ -10,6 +11,18 @@ from pydantic import BaseModel
 T = TypeVar("T", bound=BaseModel)
 
 DEFAULT_MODEL = "gemini-3.8-flash"
+
+# A delivery or evidence check normally answers in 5 to 20 s. One model call that stalls
+# should cost one fresh try, not the whole time limit: on 5 Nov 2026 a check that answers
+# in 7 s waited out the 90 s limit and failed. Two tries of 40 s stay inside that limit.
+CHECK_ATTEMPT_SECONDS = float(os.environ.get("CHECK_ATTEMPT_SECONDS", "40"))
+CHECK_ATTEMPTS = 2
+_TRANSIENT_CODES = (429, 500, 502, 503, 504)
+
+
+def _transient(e: Exception) -> bool:
+    """A busy or failing model service (rate limit, 5xx): worth one more try."""
+    return getattr(e, "code", None) in _TRANSIENT_CODES
 
 
 def model_id() -> str:
@@ -46,21 +59,32 @@ def _get_client():
 
 
 async def generate_json(prompt: str, schema: type[T], *, temperature: float = 0.1,
-                        attachments: list[tuple[bytes, str]] | None = None) -> T:
-    """`attachments`: (bytes, mime type) pairs sent with the prompt, e.g. an image the model reads."""
+                        attachments: list[tuple[bytes, str]] | None = None,
+                        attempt_seconds: float | None = None, attempts: int = 1) -> T:
+    """`attachments`: (bytes, mime type) pairs sent with the prompt, e.g. an image the model reads.
+    `attempt_seconds` and `attempts`: give each call that long, then start a fresh one, up to
+    `attempts` calls; a rate limit or server error also gets the fresh call. Without them
+    the call runs once, as long as the caller allows."""
     from google.genai import types
     contents: object = prompt
     if attachments:
         contents = [types.Part.from_bytes(data=b, mime_type=mime) for b, mime in attachments] + [prompt]
-    resp = await _get_client().aio.models.generate_content(
-        model=model_id(),
-        contents=contents,
-        config=types.GenerateContentConfig(
-            temperature=temperature,
-            response_mime_type="application/json",
-            response_schema=schema,
-        ),
+    config = types.GenerateContentConfig(
+        temperature=temperature,
+        response_mime_type="application/json",
+        response_schema=schema,
     )
+    for n in range(max(1, attempts)):
+        call = _get_client().aio.models.generate_content(model=model_id(), contents=contents, config=config)
+        try:
+            resp = await (asyncio.wait_for(call, timeout=attempt_seconds) if attempt_seconds else call)
+            break
+        except asyncio.TimeoutError:
+            if n == attempts - 1:
+                raise
+        except Exception as e:
+            if n == attempts - 1 or not _transient(e):
+                raise
     parsed = getattr(resp, "parsed", None)
     if isinstance(parsed, schema):
         return parsed

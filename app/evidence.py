@@ -31,7 +31,7 @@ from typing import Optional
 import pymupdf
 from pydantic import BaseModel, Field
 
-from .llm import generate_json
+from .llm import CHECK_ATTEMPT_SECONDS, CHECK_ATTEMPTS, generate_json
 from .schedule import Milestone, Schedule
 from .verify import check_quote, normalise
 
@@ -385,7 +385,8 @@ async def check_evidence(s: Schedule, m: Milestone, ev: EvidenceFile) -> Evidenc
                              summary="The contract lists no acceptance criteria for this milestone, so there is "
                                      "nothing to check the file against. Read it yourself and decide.")
     out = await generate_json(build_prompt(s, m, ev, items), EvidenceCheckOut,
-                              attachments=None if ev.text_checked else [(ev.data, ev.mime)])
+                              attachments=None if ev.text_checked else [(ev.data, ev.mime)],
+                              attempt_seconds=CHECK_ATTEMPT_SECONDS, attempts=CHECK_ATTEMPTS)
     # Matching quotes against the file's text is CPU work: off the event loop.
     return await asyncio.to_thread(judge, items, out, ev)
 
