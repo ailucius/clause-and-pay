@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
+from contextlib import asynccontextmanager
 import os
 import uuid
 from datetime import date, datetime, timezone
@@ -32,11 +33,21 @@ SAMPLE = ROOT.parent / "samples" / "northwind-harbour-services-agreement.pdf"
 SAMPLE_EVIDENCE = ROOT.parent / "samples" / "evidence"
 MAX_UPLOAD = 15 * 1024 * 1024
 AGENT_TIMEOUT = float(os.environ.get("AGENT_TIMEOUT_SECONDS", "120"))
+SAMPLE_AT_START = os.environ.get("READ_SAMPLE_AT_START", "1").lower() in ("1", "true", "yes")
+SAMPLE_AT_START_SECONDS = float(os.environ.get("READ_SAMPLE_AT_START_SECONDS", "60"))
 CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT_SECONDS", "90"))
 MIN_OVERRIDE_REASON = 10
 
 log = logging.getLogger("clausepay")
-app = FastAPI(title="Clause & Pay")
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    await _read_sample_at_start()
+    yield
+
+
+app = FastAPI(title="Clause & Pay", lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
@@ -213,6 +224,20 @@ async def upload(request: Request, file: UploadFile = File(...)):
 
 
 _sample_sched: Optional[Schedule] = None
+
+
+async def _read_sample_at_start() -> None:
+    """Read the sample before the first visitor arrives. It is read by the model once per
+    server start, and the first click used to pay for that with a 12 s wait (10 Nov 2026).
+    If the read fails here, the first click reads it as before."""
+    global _sample_sched
+    if _sample_sched is not None or not SAMPLE_AT_START or not ai_configured():
+        return
+    try:
+        _sample_sched = await asyncio.wait_for(read_contract(SAMPLE.read_bytes()), timeout=SAMPLE_AT_START_SECONDS)
+    except Exception as e:  # a slow or failing model must not stop the server from starting
+        log.warning("The sample was not read at start (%s); the first visitor's click reads it.", type(e).__name__)
+
 
 
 @app.post("/api/contracts/sample")

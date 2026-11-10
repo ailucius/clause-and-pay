@@ -4,6 +4,8 @@ Invoices that read the contract first.
 
 **Live demo (PayPal sandbox, fictional sample contract):** https://clause-and-pay-384599766402.europe-west1.run.app
 
+**Two-minute tour:** press "Use the sample contract", check one of the sample evidence files against the milestone's acceptance criteria, send the PayPal sandbox invoice, record the payment, then ask the billing agent what is open. No account and no set-up are needed.
+
 Small suppliers and freelancers often work under a written contract that says exactly when they may invoice, how much, and what happens when the client pays late. In practice the contract sits in a folder, invoices are typed by hand, and a disputed invoice turns into an argument about what the contract says.
 
 Clause & Pay is an AI billing agent built on PayPal Invoicing, PayPal Webhooks and the PayPal Agent Toolkit:

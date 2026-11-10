@@ -332,6 +332,9 @@ function renderBooks() {
   if (AG) {
     ensureGrids();
     GRIDS.inv.setGridOption("rowData", inv);
+    // "in 30 d" beside the due date comes from the row's days, not from the due date
+    // itself: when only the status changes (paid), the grid would keep the old cell.
+    GRIDS.inv.refreshCells({ columns: ["due_date"], force: true });
     GRIDS.led.setGridOption("rowData", led);
   } else {
     plainTable($("#invgrid"), invColumns().filter((c) => c.field !== "link"), inv, NO_ROWS.inv);

@@ -110,3 +110,18 @@ def test_every_progress_message_list_has_a_message_from_the_first_second() -> No
     assert shown["NOTE_STEPS"].startswith("Checking it against the contract")
     # A list that starts late shows its first message, it does not throw.
     assert shown["late"].startswith("Checking it against the contract")
+
+
+def test_the_start_screen_says_what_to_press_and_names_paypal() -> None:
+    page = TestClient(server.app).get("/").text
+    assert "Two-minute tour, all in the PayPal sandbox" in page
+    for step in ("use the sample contract", "sample evidence file", "send the PayPal invoice", "record the payment", "ask the billing agent"):
+        assert step in page, step
+
+
+def test_the_due_cell_is_redrawn_when_only_the_status_changes() -> None:
+    """A paid invoice kept "in 30 d" beside its due date: the text comes from the row's
+    days, and the grid only redraws a cell whose own value changed."""
+    js = _static("app.js")
+    after = js.split('GRIDS.inv.setGridOption("rowData", inv);', 1)[1][:400]
+    assert 'GRIDS.inv.refreshCells({ columns: ["due_date"], force: true });' in after
