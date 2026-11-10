@@ -23,12 +23,17 @@ from paypal_agent_toolkit.shared.api import PayPalAPI
 from paypal_agent_toolkit.shared.configuration import Context
 from paypal_agent_toolkit.shared.tools import tools as PAYPAL_TOOLS
 
-from .llm import _get_client, model_id
+from .llm import _get_client, model_id, with_fresh_tries
 from .schedule import Schedule
 
 READ_TOOLS = ("list_invoices", "get_invoice", "search_invoicing")
 APPROVAL_TOOLS = ("send_invoice_reminder",)
 MAX_ROUNDS = 6
+# One round of the model normally answers in a few seconds. A round that stalls gets one
+# fresh try instead of costing the whole question its time limit (the checks got the same
+# on 5 Nov 2026; the agent on 10 Nov).
+ROUND_SECONDS = float(os.environ.get("AGENT_ROUND_SECONDS", "40"))
+ROUND_ATTEMPTS = 2
 
 SYSTEM = """You are the billing agent for a small supplier. You answer questions about one contract and the PayPal invoices raised under it.
 
@@ -135,7 +140,9 @@ async def ask(question: str, context_text: str, api: Optional[PayPalAPI] = None,
     trace: list[dict] = []
     proposals: list[dict] = []
     for _ in range(MAX_ROUNDS):
-        resp = await client.aio.models.generate_content(model=model_id(), contents=contents, config=cfg)
+        resp = await with_fresh_tries(
+            lambda: client.aio.models.generate_content(model=model_id(), contents=contents, config=cfg),
+            attempt_seconds=ROUND_SECONDS, attempts=ROUND_ATTEMPTS)
         cand = resp.candidates[0]
         contents.append(cand.content)
         calls = [p.function_call for p in (cand.content.parts or []) if p.function_call]

@@ -80,3 +80,57 @@ def test_a_reminder_is_only_proposed_never_sent(monkeypatch):
 def test_only_reminders_can_be_approved():
     with pytest.raises(ValueError):
         asyncio.run(billing_agent.approve({"method": "delete_invoice", "args": {}}, api=FakeAPI()))
+
+
+class StallingModels(FakeModels):
+    """`"stall"` in the script is a round that does not answer; an exception is raised as it is."""
+
+    async def generate_content(self, model, contents, config):
+        step = self.script.pop(0)
+        self.seen.append(step)
+        if step == "stall":
+            await asyncio.sleep(5)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+def _stalling(monkeypatch, script):
+    models = StallingModels(script)
+    client = SimpleNamespace(aio=SimpleNamespace(models=models))
+    monkeypatch.setattr(billing_agent, "_get_client", lambda: client)
+    monkeypatch.setattr(billing_agent, "ROUND_SECONDS", 0.05)
+    return models
+
+
+def test_a_stalled_round_gets_one_fresh_try_that_answers(monkeypatch):
+    models = _stalling(monkeypatch, ["stall", _resp(_text("Two invoices are open."))])
+    out = asyncio.run(billing_agent.ask("What is open?", "ctx", api=FakeAPI(), allowed=set()))
+    assert out["answer"] == "Two invoices are open."
+    assert len(models.seen) == 2
+
+
+def test_two_stalled_rounds_give_up_with_a_timeout(monkeypatch):
+    models = _stalling(monkeypatch, ["stall", "stall", _resp(_text("never reached"))])
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(billing_agent.ask("What is open?", "ctx", api=FakeAPI(), allowed=set()))
+    assert len(models.seen) == 2
+
+
+def test_a_busy_model_service_gets_the_fresh_try_and_a_request_error_does_not(monkeypatch):
+    busy = Exception("busy")
+    busy.code = 429
+    models = _stalling(monkeypatch, [busy, _resp(_text("ok"))])
+    assert asyncio.run(billing_agent.ask("q", "ctx", api=FakeAPI(), allowed=set()))["answer"] == "ok"
+    bad = Exception("bad request")
+    bad.code = 400
+    models = _stalling(monkeypatch, [bad, _resp(_text("never reached"))])
+    with pytest.raises(Exception, match="bad request"):
+        asyncio.run(billing_agent.ask("q", "ctx", api=FakeAPI(), allowed=set()))
+    assert len(models.seen) == 1
+
+
+def test_two_tries_of_a_round_fit_inside_the_agents_time_limit():
+    from app import server
+
+    assert billing_agent.ROUND_SECONDS * billing_agent.ROUND_ATTEMPTS < server.AGENT_TIMEOUT

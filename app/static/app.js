@@ -75,7 +75,8 @@ function ledgerTotals() {
 function progress(node, steps, t0 = Date.now()) {
   const tick = () => {
     const s = Math.floor((Date.now() - t0) / 1000);
-    const step = steps.filter(([from]) => s >= from).pop();
+    // The step whose time has come; before the first one's time, the first one.
+    const step = steps.filter(([from]) => s >= from).pop() || steps[0];
     node.textContent = step[1].replace("{s}", s);
   };
   tick();
@@ -408,6 +409,8 @@ const CHECK_STEPS = [
   [12, "Still checking ({s} s). Every quote is matched against the file's own text."],
   [30, "Taking longer than usual ({s} s). Large files and images take longest."],
 ];
+// A typed note has no file to read: its first message shows from the first second.
+const NOTE_STEPS = [[0, CHECK_STEPS[1][1]], ...CHECK_STEPS.slice(2)];
 const VERDICT_WORDS = { met: "Met", not_met: "Not met", not_shown: "Not shown", unchecked: "Confirm by eye" };
 const ADVICE = "This check is advice, not a decision. The model can be wrong, and a file can be written to mislead it: a quote found in the file shows the words are there, not that they are true. Read the quotes, then decide.";
 const QUOTE_WORDS = {
@@ -464,7 +467,7 @@ function evidenceForm(m, err) {
     const ev = el("textarea", { id: "evidence", placeholder: "What did you deliver, and has the client accepted it? e.g. 'Inception report sent 5 Oct. Survey method, 1,250 passenger sample, dated work plan for M2 to M4. Accepted in writing by Ada Brennan on 9 Oct.'" });
     const checkBtn = el("button", { class: "btn primary", disabled: !CFG.ai, onclick: async () => {
       err.textContent = ""; checkBtn.disabled = true;
-      const stop = progress(status, CHECK_STEPS.slice(1));
+      const stop = progress(status, NOTE_STEPS);
       try { W = await post(`/api/contracts/${W.id}/milestones/${m.code}/deliver`, { evidence: ev.value }); stop(); OPEN_AGAIN = null; render(); }
       catch (e) { stop(); status.textContent = ""; err.textContent = e.message; checkBtn.disabled = false; }
     } }, "Mark delivered and check");

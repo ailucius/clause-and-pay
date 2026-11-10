@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import TypeVar
+from typing import Awaitable, Callable, TypeVar
 
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
+R = TypeVar("R")
 
 DEFAULT_MODEL = "gemini-3.8-flash"
 
@@ -58,6 +59,24 @@ def _get_client():
     return _client
 
 
+async def with_fresh_tries(make_call: Callable[[], Awaitable[R]], *, attempt_seconds: float | None,
+                           attempts: int) -> R:
+    """Run one model call; if it stalls past `attempt_seconds`, or the service is busy
+    or failing, start a fresh one, up to `attempts` calls in all."""
+    attempts = max(1, attempts)
+    for n in range(attempts):
+        call = make_call()
+        try:
+            return await (asyncio.wait_for(call, timeout=attempt_seconds) if attempt_seconds else call)
+        except asyncio.TimeoutError:
+            if n == attempts - 1:
+                raise
+        except Exception as e:
+            if n == attempts - 1 or not _transient(e):
+                raise
+    raise AssertionError("unreachable")
+
+
 async def generate_json(prompt: str, schema: type[T], *, temperature: float = 0.1,
                         attachments: list[tuple[bytes, str]] | None = None,
                         attempt_seconds: float | None = None, attempts: int = 1) -> T:
@@ -74,17 +93,9 @@ async def generate_json(prompt: str, schema: type[T], *, temperature: float = 0.
         response_mime_type="application/json",
         response_schema=schema,
     )
-    for n in range(max(1, attempts)):
-        call = _get_client().aio.models.generate_content(model=model_id(), contents=contents, config=config)
-        try:
-            resp = await (asyncio.wait_for(call, timeout=attempt_seconds) if attempt_seconds else call)
-            break
-        except asyncio.TimeoutError:
-            if n == attempts - 1:
-                raise
-        except Exception as e:
-            if n == attempts - 1 or not _transient(e):
-                raise
+    resp = await with_fresh_tries(
+        lambda: _get_client().aio.models.generate_content(model=model_id(), contents=contents, config=config),
+        attempt_seconds=attempt_seconds, attempts=attempts)
     parsed = getattr(resp, "parsed", None)
     if isinstance(parsed, schema):
         return parsed

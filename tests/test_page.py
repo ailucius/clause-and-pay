@@ -72,3 +72,41 @@ def test_a_mouse_click_draws_no_cell_focus_box_but_the_keyboard_keeps_it() -> No
     assert 'addEventListener("pointerdown", () => host.classList.add("pointer-focus"), true)' in js
     assert 'addEventListener("keydown", () => host.classList.remove("pointer-focus"), true)' in js
     assert ".aggrid.pointer-focus .ag-cell-focus:not(.ag-cell-range-selected):focus-within { border-color: transparent; }" in css
+
+
+def test_every_progress_message_list_has_a_message_from_the_first_second() -> None:
+    """The typed-note check passed a list whose first message started at 2 s, so the
+    progress helper threw before the request was sent: the button went grey and
+    nothing happened (10 Nov 2026). Runs the page's own helper in Node."""
+    import json
+    import re
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    js = _static("app.js")
+    helper = re.search(r"function progress\(node, steps, t0 = Date\.now\(\)\) \{.*?\n\}\n", js, re.S).group(0)
+    steps = re.search(r"const CHECK_STEPS = \[.*?\];", js, re.S).group(0)
+    note = re.search(r"const NOTE_STEPS = .*?;", js).group(0)
+    used = set(re.findall(r"progress\(status, ([A-Z_]+)\)", js))
+    assert used == {"CHECK_STEPS", "NOTE_STEPS"}
+    script = helper + steps + note + """
+      const out = {};
+      for (const [name, list] of [["CHECK_STEPS", CHECK_STEPS], ["NOTE_STEPS", NOTE_STEPS], ["late", CHECK_STEPS.slice(1)]]) {
+        const node = { textContent: "" };
+        const stop = progress(node, list);
+        out[name] = node.textContent; stop();
+      }
+      console.log(JSON.stringify(out));
+    """
+    done = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    shown = json.loads(done.stdout)
+    assert shown["CHECK_STEPS"] == "Reading the file..."
+    assert shown["NOTE_STEPS"].startswith("Checking it against the contract")
+    # A list that starts late shows its first message, it does not throw.
+    assert shown["late"].startswith("Checking it against the contract")
